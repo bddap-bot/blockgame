@@ -18,9 +18,15 @@ You land on a title screen: **Start a new world**, and under it every world bein
 on this network, by the name of the machine hosting it. D-pad to choose, `A` to go. No
 typing, which is the point — the players are on Steam Decks in gaming mode.
 
+![the join menu, listing a world hosted on the LAN](docs/join-menu.png)
+
 A friend who is *not* on this network needs the ticket. Pause (`Start` / `Esc`) →
 **Share the join ticket**: it goes on the clipboard and into
-`~/.local/share/blockgame/ticket.txt`, which is how you get it off a Deck over ssh. Then:
+`~/.local/share/blockgame/ticket.txt`, which is how you get it off a Deck over ssh.
+
+![the pause menu, having just shared the join ticket](docs/share-ticket.png)
+
+Then:
 
 ```sh
 nix-shell --run 'cargo run --release -- join <TICKET>'

@@ -7,6 +7,7 @@
 //! they are). Everything else is role-blind, which is what "single player is multiplayer
 //! with zero peers" has to mean if it is going to stay true.
 
+use bevy::input::InputSystems;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use std::collections::{HashMap, HashSet};
@@ -243,7 +244,13 @@ pub fn run(start: Start) -> anyhow::Result<()> {
     .insert_non_send_resource(Share::default())
     // Menus read the pad every frame, whichever one is up and whether one is up at all:
     // a menu that only reads input while it is open cannot see the press that opened it.
-    .add_systems(PreUpdate, gather_menu_intent)
+    //
+    // `after(InputSystems)` is load-bearing. `PreUpdate` is also where bevy refreshes
+    // `ButtonInput`, and unordered this ran *first* — reading each frame's presses one
+    // frame late, so the Escape that opened the pause menu was still "just pressed" on
+    // the frame the menu came up and closed it again within it. The menu was
+    // unreachable and nothing was on fire.
+    .add_systems(PreUpdate, gather_menu_intent.after(InputSystems))
     .add_systems(OnEnter(Phase::Title), title::enter)
     .add_systems(OnExit(Phase::Title), title::leave)
     .add_systems(

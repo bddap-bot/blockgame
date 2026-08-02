@@ -121,7 +121,7 @@ pub fn setup(mut commands: Commands) {
         TextLayout::new_with_justify(Justify::Center),
         Node {
             position_type: PositionType::Absolute,
-            top: Val::Px(70.0),
+            top: Val::Px(104.0),
             left: Val::Percent(15.0),
             width: Val::Percent(70.0),
             padding: UiRect::axes(Val::Px(12.0), Val::Px(8.0)),

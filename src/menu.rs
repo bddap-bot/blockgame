@@ -22,9 +22,10 @@ const ROW_PAD: f32 = 10.0;
 const SELECTED: Color = Color::srgb(1.0, 0.85, 0.35);
 const UNSELECTED: Color = Color::srgb(0.86, 0.88, 0.92);
 const HINT: Color = Color::srgb(0.62, 0.66, 0.72);
-/// The panel behind the list. Opaque enough that a bright world behind it cannot make a
-/// row unreadable, translucent enough that a paused game is still visibly the game.
-const PANEL: Color = Color::srgba(0.05, 0.06, 0.09, 0.88);
+/// The panel behind the list. Nearly opaque: a paused world is a sunlit voxel forest,
+/// and at anything less the trees read straight through a row of text. What is left of
+/// the world through it is enough to see the game is still there.
+const PANEL: Color = Color::srgba(0.05, 0.06, 0.09, 0.96);
 const SELECTED_ROW: Color = Color::srgba(1.0, 0.85, 0.35, 0.16);
 
 /// What a panel shows. Compared against what is already drawn, so the UI is rebuilt when
