@@ -51,14 +51,14 @@ pub const MAX_CLIMB: f32 = 1.1;
 
 /// Half the car's footprint, along its own facing and across it. The wheels, not the
 /// bumpers: a bumper overhanging a ledge should not hold the car up.
-pub const HALF_LENGTH: f32 = 0.62;
-pub const HALF_WIDTH: f32 = 0.55;
+pub const HALF_LENGTH: f32 = 0.90;
+pub const HALF_WIDTH: f32 = 0.76;
 
 /// The driver's feet, relative to the car's underside: `+X` right, `+Y` up, `-Z` forward —
 /// the same model space [`crate::avatar`] draws in. On the deck and behind the bonnet, so
 /// there is something in shot from the seat. `avatar::the_driver_stands_on_the_deck` pins
 /// it to the model, rather than to a number that drifts away from it.
-pub const SEAT: Vec3 = Vec3::new(0.0, 0.47, 0.22);
+pub const SEAT: Vec3 = Vec3::new(0.0, 0.28, 0.32);
 /// How far from the car you may still get into it.
 pub const BOARDING_RANGE: f32 = 3.5;
 /// How far in front of its owner a car is put down. Clear of the player's own box, and
@@ -96,7 +96,9 @@ impl Car {
     /// walking collision takes it from there — including pushing them out of a wall they
     /// parked against.
     pub fn step_out(self) -> Vec3 {
-        let out = Vec3::new(HALF_WIDTH + player::HALF_WIDTH + 0.2, HOVER, 0.0);
+        // Level with the car's own underside, which is already clear of the ground by
+        // [`HOVER`] — the walking fall settles the last hair of it.
+        let out = Vec3::new(HALF_WIDTH + player::HALF_WIDTH + 0.2, 0.0, 0.0);
         self.pos + Quat::from_rotation_y(self.yaw) * out
     }
 }
@@ -560,6 +562,55 @@ mod tests {
         assert!(
             standing.distance(car.pos) > HALF_WIDTH,
             "stepped out into the car: {standing}"
+        );
+    }
+
+    /// The whole feature, in the order a child does it: put the car down, get in, drive up
+    /// over a step and away, get out, and be standing on the ground next to it a long way
+    /// from where you started.
+    #[test]
+    fn park_board_drive_and_step_out() {
+        let mut w = flat_world();
+        for z in -EDGE..(EDGE + CHUNK_SIZE) {
+            for x in 12..(EDGE + CHUNK_SIZE) {
+                w.set_block(BlockPos::new(x, FLOOR + 1, z), Block::Stone);
+            }
+        }
+        let start = Vec3::new(0.5, (FLOOR + 1) as f32, 0.5);
+
+        let car = park_in_front(&w, start, EAST).expect("standing on the test floor");
+        let (mut ride, feet) = toggle_ride(Ride::Parked(car), start);
+        assert!(
+            ride.is_driving(),
+            "could not get into a car parked in reach"
+        );
+
+        let mut feet = feet;
+        for _ in 0..4 * 60 {
+            let Ride::Driving(car) = ride else {
+                unreachable!("nothing gets a driver out but the button")
+            };
+            let driven = drive(&w, car, Vec2::new(0.0, 1.0), 1.0 / 60.0);
+            feet = driven.seat();
+            ride = Ride::Driving(driven);
+        }
+
+        let (parked, standing) = toggle_ride(ride, feet);
+        let Ride::Parked(car) = parked else {
+            panic!("stepping out left them {parked:?}")
+        };
+        assert!(
+            standing.x > 30.0,
+            "four seconds of driving got them to x={}",
+            standing.x
+        );
+        assert!(
+            (standing.y - (FLOOR + 2) as f32 - HOVER).abs() < 0.01,
+            "stepped out onto nothing: {standing}"
+        );
+        assert!(
+            standing.distance(car.pos) > HALF_WIDTH,
+            "stepped out into their own car"
         );
     }
 

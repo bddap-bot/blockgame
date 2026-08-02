@@ -33,7 +33,7 @@ impl Subject {
     fn size(self) -> (u32, u32) {
         match self {
             Subject::Spaceman => (720, 960),
-            Subject::Car => (1120, 760),
+            Subject::Car => (1120, 800),
         }
     }
 
@@ -42,7 +42,7 @@ impl Subject {
     fn view(self) -> (Vec3, Vec3) {
         match self {
             Subject::Spaceman => (Vec3::new(-1.15, 1.45, -2.7), Vec3::new(0.0, 0.92, 0.0)),
-            Subject::Car => (Vec3::new(-2.6, 2.0, -4.2), Vec3::new(0.0, 0.8, 0.0)),
+            Subject::Car => (Vec3::new(-3.9, 2.7, -5.4), Vec3::new(0.0, 0.80, 0.0)),
         }
     }
 }

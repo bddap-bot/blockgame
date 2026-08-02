@@ -100,38 +100,52 @@ pub const SPACEMAN: &[Part] = &[
 ///
 /// Open-topped for a second reason too — the body has no sitting pose, so a driver stands
 /// on the deck. Under a roof that would be a spaceman with his helmet through the ceiling.
+/// Big enough to be a car around him rather than a skateboard under him: the tub comes up
+/// past his belt, which is what makes him read as being *in* it.
 pub const CAR: &[Part] = &[
-    // chassis and the deck the driver stands on
-    part(Skin::Paint(Item::Car), [1.10, 0.30, 1.70], [0.0, 0.28, 0.0]),
-    part(Skin::Dark, [0.90, 0.06, 0.80], [0.0, 0.44, 0.25]),
+    // the floor pan, and the low deck inside it the driver stands on
+    part(Skin::Paint(Item::Car), [1.52, 0.22, 2.30], [0.0, 0.11, 0.0]),
+    part(Skin::Dark, [1.14, 0.06, 1.00], [0.0, 0.25, 0.32]),
+    // the tub around him: two sides and a back
+    part(
+        Skin::Paint(Item::Car),
+        [0.18, 0.72, 1.30],
+        [-0.67, 0.58, 0.30],
+    ),
+    part(
+        Skin::Paint(Item::Car),
+        [0.18, 0.72, 1.30],
+        [0.67, 0.58, 0.30],
+    ),
+    part(
+        Skin::Paint(Item::Car),
+        [1.52, 0.72, 0.18],
+        [0.0, 0.58, 0.97],
+    ),
     // bonnet, and the screen between it and the driver
     part(
         Skin::Paint(Item::Car),
-        [0.98, 0.18, 0.62],
-        [0.0, 0.52, -0.50],
+        [1.46, 0.44, 0.95],
+        [0.0, 0.44, -0.72],
     ),
-    part(Skin::Dark, [0.88, 0.30, 0.05], [0.0, 0.62, -0.17]),
-    part(Skin::Trim, [0.92, 0.05, 0.06], [0.0, 0.79, -0.17]),
-    // roll bar behind the seat
-    part(Skin::Gear, [0.09, 0.44, 0.09], [-0.42, 0.72, 0.62]),
-    part(Skin::Gear, [0.09, 0.44, 0.09], [0.42, 0.72, 0.62]),
-    part(Skin::Gear, [0.93, 0.09, 0.09], [0.0, 0.98, 0.62]),
+    part(Skin::Dark, [1.32, 0.46, 0.06], [0.0, 0.87, -0.24]),
+    part(Skin::Trim, [1.38, 0.07, 0.09], [0.0, 1.13, -0.24]),
     // wheels, at the corners of the footprint the physics drives on
-    part(Skin::Dark, [0.18, 0.40, 0.40], [-0.55, 0.20, -0.62]),
-    part(Skin::Dark, [0.18, 0.40, 0.40], [0.55, 0.20, -0.62]),
-    part(Skin::Dark, [0.18, 0.40, 0.40], [-0.55, 0.20, 0.62]),
-    part(Skin::Dark, [0.18, 0.40, 0.40], [0.55, 0.20, 0.62]),
-    part(Skin::Trim, [0.21, 0.16, 0.16], [-0.55, 0.20, -0.62]),
-    part(Skin::Trim, [0.21, 0.16, 0.16], [0.55, 0.20, -0.62]),
-    part(Skin::Trim, [0.21, 0.16, 0.16], [-0.55, 0.20, 0.62]),
-    part(Skin::Trim, [0.21, 0.16, 0.16], [0.55, 0.20, 0.62]),
+    part(Skin::Dark, [0.24, 0.56, 0.56], [-0.76, 0.28, -0.90]),
+    part(Skin::Dark, [0.24, 0.56, 0.56], [0.76, 0.28, -0.90]),
+    part(Skin::Dark, [0.24, 0.56, 0.56], [-0.76, 0.28, 0.90]),
+    part(Skin::Dark, [0.24, 0.56, 0.56], [0.76, 0.28, 0.90]),
+    part(Skin::Trim, [0.28, 0.24, 0.24], [-0.76, 0.28, -0.90]),
+    part(Skin::Trim, [0.28, 0.24, 0.24], [0.76, 0.28, -0.90]),
+    part(Skin::Trim, [0.28, 0.24, 0.24], [-0.76, 0.28, 0.90]),
+    part(Skin::Trim, [0.28, 0.24, 0.24], [0.76, 0.28, 0.90]),
     // bumpers and lamps — which end is the front, from a distance
-    part(Skin::Gear, [1.06, 0.14, 0.10], [0.0, 0.22, -0.90]),
-    part(Skin::Gear, [1.06, 0.14, 0.10], [0.0, 0.22, 0.90]),
-    part(Skin::Trim, [0.16, 0.12, 0.06], [-0.34, 0.36, -0.86]),
-    part(Skin::Trim, [0.16, 0.12, 0.06], [0.34, 0.36, -0.86]),
-    part(Skin::Dark, [0.14, 0.10, 0.06], [-0.34, 0.36, 0.86]),
-    part(Skin::Dark, [0.14, 0.10, 0.06], [0.34, 0.36, 0.86]),
+    part(Skin::Gear, [1.44, 0.20, 0.14], [0.0, 0.24, -1.22]),
+    part(Skin::Gear, [1.44, 0.20, 0.14], [0.0, 0.24, 1.22]),
+    part(Skin::Trim, [0.24, 0.18, 0.08], [-0.46, 0.50, -1.17]),
+    part(Skin::Trim, [0.24, 0.18, 0.08], [0.46, 0.50, -1.17]),
+    part(Skin::Dark, [0.20, 0.14, 0.08], [-0.46, 0.42, 1.17]),
+    part(Skin::Dark, [0.20, 0.14, 0.08], [0.46, 0.42, 1.17]),
 ];
 
 /// The cube in a player's right mitten: where it sits, and how big it is.

@@ -41,7 +41,11 @@ joining player ignores their own seed and gets the host's world.
 | place block    | right click      | `L2`                 |
 | hotbar         | `1`–`9`, `Q`/`E` | d-pad                |
 | craft          | `C`              | `X`                  |
+| get in / out   | `R`              | `B`                  |
 | quit           | `Esc`            | `Select` + `Start`   |
+
+In the car the left stick is the whole of it: forward and back is the throttle, left and
+right is the steering. Everything else works from the seat.
 
 You start in the air, flying, with nothing. Press `F` to drop into walking, then break
 something — it is yours.
@@ -77,11 +81,36 @@ have one.
 | parachute   | 6 leaves + 2 nails         |
 | car         | 6 wood + 2 stone + 8 nails |
 
-The cushion is a block, so you can build with it. The rest you can make and carry —
-everyone else sees what is in your hand — but none of them *does* anything yet. That is
-the next job, one item at a time.
+The cushion is a block, so you can build with it, and the car you can drive. The rest you
+can make and carry — everyone else sees what is in your hand — but none of them *does*
+anything yet. That is the next job, one item at a time.
 
 ![the hotbar after digging up ten stone and making three nails](docs/hotbar.png)
+
+## The car
+
+<img src="docs/car.png" alt="a blocky blue car with the spaceman standing at the wheel" width="520">
+
+Six wood, two stone and eight nails, and it is the fastest thing you own — comfortably
+quicker than a sprint. Point the hotbar at it and press place to stand it in front of you;
+press it again to put it back in your pocket. `B` gets you in, and `B` gets you out on the
+driver's side.
+
+Driving is the left stick and nothing else. Steering turns the car, which turns you, which
+turns the camera — so the view follows the car without there being a second camera to keep
+in step. Look up and down is still yours, and so is the trigger: a hill can be shot at
+from the driver's seat.
+
+It hovers over whatever is under its four wheels rather than simulating any. A step up to
+a block high is a hill and it drives up it; anything higher is a wall and stops it dead.
+Drive off a ledge and it falls. Drive to the edge of the world and it stops, because there
+is no ground out there to be on yet.
+
+Your friends see it move with you in it. A car rides the same pose stream your body does —
+it is the same kind of fact, "where this player is right now" — which is also what bounds
+them: one car each, never more of them in the world than there are people in it. And the
+host clears the car off anybody's pose who never built one, because the item is the one
+half of a car the host actually owns.
 
 ## Who you are
 
@@ -89,9 +118,10 @@ the next job, one item at a time.
 
 Everyone in the world is this spaceman, drawn from
 [`design/spaceman-avatar.jpg`](design/spaceman-avatar.jpg). He is one table of boxes in
-`src/avatar.rs`; `blockgame portrait` re-renders the picture above from it, and
+`src/avatar.rs`; `blockgame portrait` re-renders the picture above from it,
 `blockgame portrait --holding hammer` shows him carrying something — what everyone else
-sees when you swap what you are holding.
+sees when you swap what you are holding — and `blockgame portrait --car --out docs/car.png`
+puts him at the wheel, which is how the seat above got checked.
 
 ## How it fits together
 
@@ -103,9 +133,10 @@ sees when you swap what you are holding.
 | `src/world.rs`      | chunk storage and seed-deterministic terrain                     |
 | `src/mesh.rs`       | turning voxels into geometry                                     |
 | `src/player.rs`     | movement and collision                                           |
+| `src/vehicle.rs`    | the car: driving, and getting in and out of one                  |
 | `src/raycast.rs`    | what you're looking at                                           |
-| `src/avatar.rs`     | **the player model** — one table of boxes                        |
-| `src/portrait.rs`   | `blockgame portrait` — renders that model to `docs/spaceman.png` |
+| `src/avatar.rs`     | **the models** — the spaceman and the car, tables of boxes       |
+| `src/portrait.rs`   | `blockgame portrait` — renders those models to `docs/`           |
 | `src/input.rs`      | keyboard/mouse/gamepad → one `Intent`                            |
 | `src/net/`          | the iroh message bus and wire format                             |
 | `src/game.rs`       | the Bevy app that wires the above together                       |
@@ -133,8 +164,9 @@ giving it a colour, and an item of class `Block` that places it. Colour lives in
 so there are no assets to make, and a variant with no arm fails to compile rather than
 crashing the first time somebody names it.
 
-What a tool, a vehicle or something wearable *does* is still nothing. Adding that is the
-work; having somewhere to put it is not.
+What a tool does is three numbers on its row. What a vehicle does is `src/vehicle.rs`, and
+a second one would be that file's constants and a second table in `src/avatar.rs`. What
+something wearable does is still nothing — that is the next job.
 
 ## Develop
 
