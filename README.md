@@ -7,6 +7,8 @@ These are the bones. There is no inventory, no crafting, no mobs, and no save fi
 a world you can walk around, dig into, build in, and share with a friend. What gets added
 on top is `design/`'s business.
 
+![a voxel world of hills, forest and beach](docs/screenshot.png)
+
 ## Play
 
 ```sh

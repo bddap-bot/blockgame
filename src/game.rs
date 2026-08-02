@@ -639,16 +639,19 @@ fn update_status(
     let Ok(mut text) = text.single_mut() else {
         return;
     };
-    let mode = if me.0.flying { "fly" } else { "walk" };
+    let mode = if me.0.flying { "flying" } else { "walking" };
+    // The ticket gets its own line: 64 characters do not share a row with anything else
+    // on the Deck's 1280px panel.
     let who = match role.0 {
-        Role::Host => format!("hosting  ticket {}", session.ticket()),
-        Role::Peer => "joined".to_string(),
+        Role::Host => format!("join ticket:  {}", session.ticket()),
+        Role::Peer => "in a friend's world".to_string(),
     };
+    // ASCII only: bevy's built-in font has no glyph for a middle dot, and a missing glyph
+    // draws as a tofu box.
     text.0 = format!(
-        "{}  |  {} player(s) nearby  |  {mode}  |  holding: {}",
-        who,
+        "{mode}  |  holding {}  |  {} player(s)\n{who}",
+        held.0.name(),
         avatars.0.len() + 1,
-        held.0.name()
     );
 }
 

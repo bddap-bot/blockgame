@@ -80,6 +80,12 @@ pub fn decode(bytes: &[u8]) -> Result<Msg> {
 mod tests {
     use super::*;
 
+    /// A real player id. Not every 32-byte string is one — a public key has to be a
+    /// valid curve point — so derive it from a secret instead of inventing bytes.
+    fn some_id() -> PlayerId {
+        iroh::SecretKey::from_bytes(&[7u8; 32]).public()
+    }
+
     fn pose() -> Pose {
         Pose {
             pos: [1.5, 2.5, -3.5],
@@ -90,7 +96,7 @@ mod tests {
 
     #[test]
     fn round_trips() {
-        let id = PlayerId::from_bytes(&[7u8; 32]).unwrap();
+        let id = some_id();
         let msgs = [
             Msg::Hello,
             Msg::Welcome {
@@ -114,7 +120,7 @@ mod tests {
     /// runtime size check and no silent fallback to the reliable path.
     #[test]
     fn datagram_messages_fit() {
-        let id = PlayerId::from_bytes(&[7u8; 32]).unwrap();
+        let id = some_id();
         let m = Msg::Pose { id, pose: pose() };
         assert!(m.via_datagram());
         let n = encode(&m).unwrap().len();

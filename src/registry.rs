@@ -67,7 +67,7 @@ pub const BLOCKS: &[BlockDef] = &[
     BlockDef {
         block: Block::Grass,
         name: "grass",
-        color: [0.25, 0.55, 0.16],
+        color: [0.36, 0.63, 0.19],
         solid: true,
     },
     BlockDef {
@@ -96,8 +96,10 @@ pub const BLOCKS: &[BlockDef] = &[
     },
     BlockDef {
         block: Block::Leaves,
+        // Distinctly darker and bluer than grass — at a distance the two greens have to
+        // stay tellable apart, or a forest reads as a lumpy field.
         name: "leaves",
-        color: [0.16, 0.42, 0.13],
+        color: [0.08, 0.31, 0.12],
         solid: true,
     },
     BlockDef {

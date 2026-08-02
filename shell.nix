@@ -1,3 +1,4 @@
+# The pinned dev environment. `nix-shell --run 'cargo run --release'` and you are playing.
 let
   pkgs = import (fetchTarball {
     url = "https://github.com/NixOS/nixpkgs/archive/d6c71932130818840fc8fe9509cf50be8c64634f.tar.gz";
@@ -11,25 +12,17 @@ pkgs.mkShell {
     clippy
     rustfmt
 
+    # bevy's linux build inputs: input devices, audio, vulkan, and both display stacks.
     pkg-config
     udev
     alsa-lib
     vulkan-loader
-    vulkan-headers
-    vulkan-validation-layers
-
+    libxkbcommon
+    wayland
     libx11
     libxcursor
     libxi
     libxrandr
-
-    libxkbcommon
-    wayland
-
-    clang
-    mold
-
-    ffmpeg
   ];
 
   LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (with pkgs; [

@@ -280,8 +280,10 @@ fn tree_here(seed: u64, x: i32, z: i32) -> Option<i32> {
     if surface_block(h) != Block::Grass {
         return None;
     }
+    // Roughly one column in 140. Denser than that and the canopies merge into a wall you
+    // can't walk or see through.
     let r = hash2(seed ^ 0x7EE_5EED, x, z);
-    if r % 100 >= 4 {
+    if r % 1000 >= 7 {
         return None;
     }
     Some(4 + (r >> 8) as i32 % 3)
@@ -419,7 +421,11 @@ mod tests {
                 assert!(w.solid(BlockPos::new(lx, h - 1, lz)));
                 assert_eq!(w.block(BlockPos::new(lx, h - 6, lz)), Block::Stone);
                 assert_eq!(w.block(BlockPos::new(lx, 0, lz)), Block::Bedrock);
-                assert!(!w.block(BlockPos::new(lx, h + 1, lz)).solid());
+                // Above the surface is open air, or a tree standing on it.
+                assert!(matches!(
+                    w.block(BlockPos::new(lx, h + 1, lz)),
+                    Block::Air | Block::Wood | Block::Leaves
+                ));
             }
         }
     }
@@ -471,9 +477,11 @@ mod tests {
                 w.load_chunk(ChunkPos::new(cx, cz));
             }
         }
+        // The loaded chunks cover [-16, 32) in x and z; scanning inside that by the
+        // canopy's reach keeps every block this test reads inside a generated chunk.
         let mut leaves = 0;
-        for wz in -20..20 {
-            for wx in -20..20 {
+        for wz in (-16 + TREE_REACH)..(32 - TREE_REACH) {
+            for wx in (-16 + TREE_REACH)..(32 - TREE_REACH) {
                 if let Some(trunk) = tree_here(seed, wx, wz) {
                     let top = terrain_height(seed, wx, wz) + trunk;
                     assert_eq!(w.block(BlockPos::new(wx, top, wz)), Block::Wood);
@@ -483,10 +491,8 @@ mod tests {
                                 continue;
                             }
                             let p = BlockPos::new(wx + dx, top, wz + dz);
-                            if (-16..16).contains(&p.x) && (-16..16).contains(&p.z) {
-                                assert!(w.solid(p), "canopy hole at {p:?} for tree ({wx},{wz})");
-                                leaves += 1;
-                            }
+                            assert!(w.solid(p), "canopy hole at {p:?} for tree ({wx},{wz})");
+                            leaves += 1;
                         }
                     }
                 }

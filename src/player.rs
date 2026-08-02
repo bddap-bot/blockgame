@@ -29,6 +29,10 @@ pub const MAX_FALL_SPEED: f32 = 55.0;
 /// surface instead of exactly on it (where the next frame's floor test is a coin flip).
 const SKIN: f32 = 1e-3;
 
+/// Longest distance moved between collision tests. Must stay under one block so nothing
+/// can be crossed unnoticed, and under the player's half-width so a wall is never skipped.
+const MAX_STEP: f32 = 0.25;
+
 /// The local player. Position is the centre of the feet; the camera hangs at
 /// [`EYE_HEIGHT`] above it.
 #[derive(Component, Debug, Clone)]
@@ -109,6 +113,27 @@ pub fn intersects_world(world: &World, pos: Vec3) -> bool {
 ///
 /// Returns the new position and whether the player ended up standing on something.
 pub fn move_and_slide(world: &World, mut pos: Vec3, delta: Vec3) -> (Vec3, bool) {
+    // A step longer than a block can pass clean through one — the collision test only
+    // looks at where you land, never at what you crossed. Splitting long moves into
+    // sub-block steps is the whole tunnelling defence, and it is also what makes the
+    // snap arithmetic below correct: after a step this short you are at most one block
+    // deep into whatever you hit.
+    let steps = (delta.length() / MAX_STEP).ceil().max(1.0) as u32;
+    let step = delta / steps as f32;
+
+    let mut landed = false;
+    for _ in 0..steps {
+        (pos, landed) = step_once(world, pos, step);
+    }
+
+    // Standing still on a floor still counts as grounded, otherwise you couldn't jump
+    // twice from the same spot.
+    let grounded =
+        landed || (delta.y <= 0.0 && intersects_world(world, pos - Vec3::Y * (SKIN * 2.0)));
+    (pos, grounded)
+}
+
+fn step_once(world: &World, mut pos: Vec3, delta: Vec3) -> (Vec3, bool) {
     let mut grounded = false;
 
     // Y first: landing on a floor before resolving X/Z means walking into a wall can't
@@ -143,12 +168,6 @@ pub fn move_and_slide(world: &World, mut pos: Vec3, delta: Vec3) -> (Vec3, bool)
         } else {
             pos = want;
         }
-    }
-
-    // Standing still on a floor still counts as grounded, otherwise you couldn't jump
-    // twice from the same spot.
-    if !grounded && delta.y <= 0.0 {
-        grounded = intersects_world(world, pos - Vec3::Y * (SKIN * 2.0));
     }
 
     (pos, grounded)
