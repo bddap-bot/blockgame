@@ -13,7 +13,7 @@ use bevy::prelude::Resource;
 use std::collections::HashMap;
 
 use crate::net::PlayerId;
-use crate::registry::{Item, Use};
+use crate::registry::{Fall, Item, Use};
 
 /// One player's things: a count per item, indexed by [`Item::index`].
 ///
@@ -91,6 +91,13 @@ impl Inventory {
     /// What the use button does for this player. A hand, unless they are holding a tool.
     pub fn using(&self, selected: Item) -> Use {
         self.in_hand(selected).map_or(Use::BARE_HAND, Item::using)
+    }
+
+    /// How this player falls. Bare, unless they are actually holding an equippable — a
+    /// parachute they have not built yet must not break the fall off the tower they built
+    /// instead of building it.
+    pub fn falling(&self, selected: Item) -> Fall {
+        self.in_hand(selected).map_or(Fall::UNAIDED, Item::falling)
     }
 
     /// How far this player may reach, whatever they have selected: the furthest any tool
@@ -256,6 +263,23 @@ mod tests {
         inv.add(Item::Rifle, 1);
         assert_eq!(inv.in_hand(Item::Rifle), Some(Item::Rifle));
         assert_eq!(inv.using(Item::Rifle), Item::Rifle.using());
+    }
+
+    /// The same rule as the rifle's, on the way down: a parachute you have not built is a
+    /// hotbar cell you are reading the recipe of, and reading a recipe mid-fall must not
+    /// break the fall.
+    #[test]
+    fn pointing_at_a_parachute_is_not_holding_one() {
+        let mut inv = Inventory::default();
+        assert_eq!(inv.falling(Item::Parachute), Fall::UNAIDED);
+
+        inv.add(Item::Parachute, 1);
+        assert_eq!(inv.falling(Item::Parachute), Item::Parachute.falling());
+        assert_eq!(
+            inv.falling(Item::Rifle),
+            Fall::UNAIDED,
+            "owning one is not holding it either"
+        );
     }
 
     /// The host's reach rule. It is answered from the pile because the pile is the one

@@ -49,7 +49,25 @@ struct BlockDef {
     /// Solid voxels stop the player and can be targeted. Whether a voxel is *drawn* is a
     /// separate question — see [`Block::visible`].
     solid: bool,
+    /// How much of the speed you land on this at you get back, upwards.
+    ///
+    /// One number rather than a springiness column and a softness column beside it:
+    /// anything that throws a player back into the air is by the same token something they
+    /// did not land hard on, so `bounce > 0` *is* [`Block::soft`] and the two cannot
+    /// disagree. Ordinary ground is `0.0` — it stops you, and a hard enough stop hurts.
+    ///
+    /// Must stay under one: a block that gives back everything it took is a player bouncing
+    /// for ever, and `nothing_bounces_higher_than_it_fell` refuses one.
+    bounce: f32,
 }
+
+/// Plain ground: something you stand on and nothing more. Every row below is written as a
+/// difference from it, so what a block row says is exactly what makes that block unusual.
+const GROUND: BlockDef = BlockDef {
+    color: [0.0, 0.0, 0.0],
+    solid: true,
+    bounce: 0.0,
+};
 
 impl Block {
     /// The table. Exhaustive on purpose: a variant with no arm is a compile error, where
@@ -57,45 +75,48 @@ impl Block {
     fn def(self) -> BlockDef {
         match self {
             Block::Air => BlockDef {
-                color: [0.0, 0.0, 0.0],
                 solid: false,
+                ..GROUND
             },
             Block::Grass => BlockDef {
                 color: [0.36, 0.63, 0.19],
-                solid: true,
+                ..GROUND
             },
             Block::Dirt => BlockDef {
                 color: [0.42, 0.28, 0.16],
-                solid: true,
+                ..GROUND
             },
             Block::Stone => BlockDef {
                 color: [0.45, 0.45, 0.47],
-                solid: true,
+                ..GROUND
             },
             Block::Sand => BlockDef {
                 color: [0.80, 0.74, 0.48],
-                solid: true,
+                ..GROUND
             },
             Block::Wood => BlockDef {
                 color: [0.36, 0.25, 0.13],
-                solid: true,
+                ..GROUND
             },
             Block::Leaves => BlockDef {
                 // Distinctly darker and bluer than grass — at a distance the two greens
                 // have to stay tellable apart, or a forest reads as a lumpy field.
                 color: [0.08, 0.31, 0.12],
-                solid: true,
+                ..GROUND
             },
             Block::Bedrock => BlockDef {
                 color: [0.10, 0.10, 0.12],
-                solid: true,
+                ..GROUND
             },
             Block::Cushion => BlockDef {
                 // Nothing in the world is pink, so a cushion reads as made rather than
                 // grown from across a valley — which is the point of the first thing a
                 // player crafts.
                 color: [0.86, 0.36, 0.60],
-                solid: true,
+                // Enough to throw a child who dropped ten blocks a couple back up, which is
+                // what makes a cushion something to jump *onto* rather than a safety mat.
+                bounce: 0.5,
+                ..GROUND
             },
         }
     }
@@ -106,6 +127,17 @@ impl Block {
 
     pub fn solid(self) -> bool {
         self.def().solid
+    }
+
+    /// How much of the speed a player lands on this at it gives back, upwards.
+    pub fn bounce(self) -> f32 {
+        self.def().bounce
+    }
+
+    /// Does landing on this break a fall? Exactly the springy blocks — see
+    /// [`BlockDef::bounce`] for why that is one question and not two.
+    pub fn soft(self) -> bool {
+        self.bounce() > 0.0
     }
 
     /// Does this voxel draw? The mesher's only notion of presence — it emits faces for a
@@ -169,6 +201,41 @@ impl Use {
     }
 }
 
+/// What wearing a thing does to a fall — the behaviour dimension of the equippables, and
+/// the exact counterpart of [`Use`] for the tools.
+///
+/// A row of numbers rather than a family of kinds, for the same reason [`Use`] is one:
+/// every fall is the same act, and a parachute only makes it *slower* and *steerable*. The
+/// one path through gravity reads these two floats and has no parachute-shaped branch in
+/// it, which is also what makes the terminal speed of an ordinary fall a row here —
+/// [`Fall::UNAIDED`] — rather than a constant beside the gravity that produces it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Fall {
+    /// Fastest a fall gets, in blocks per second. What you hit the ground at, and so —
+    /// through [`crate::player::fall_damage`] — how much a landing hurts.
+    pub max_speed: f32,
+    /// What the stick is worth on the way down, as a multiple of the speed the same stick
+    /// buys on the ground. One is ordinary air control; more is a canopy you can steer.
+    pub drift: f32,
+}
+
+impl Fall {
+    /// Falling with nothing on, and the baseline every equippable is measured against.
+    ///
+    /// Anything that is not an equippable falls like this, so "how do I fall" always has an
+    /// answer and holding a hammer is not a special case.
+    pub const UNAIDED: Fall = Fall {
+        max_speed: 55.0,
+        drift: 1.0,
+    };
+
+    /// How this reads on the HUD, or nothing for an ordinary fall — a player holding a nail
+    /// is told about the nail, not about gravity.
+    pub fn summary(self) -> Option<String> {
+        (self.max_speed < Fall::UNAIDED.max_speed).then(|| "floats down and steers".to_string())
+    }
+}
+
 /// `2.5` as "2.5" and `4.0` as "4": a whole number of times faster is written as one.
 fn round(x: f32) -> String {
     if (x - x.round()).abs() < 0.05 {
@@ -185,9 +252,10 @@ fn round(x: f32) -> String {
 /// only a colour, because a colour is all there is to draw of a thing with no behaviour
 /// yet.
 ///
-/// A [`Use`] lives on the tool arm rather than beside the class, so a component cannot be
-/// given a rifle's range by a mistyped table row: "a tool is the thing you use" is a fact
-/// about the shape of this enum.
+/// A [`Use`] lives on the tool arm and a [`Fall`] on the equippable arm, rather than beside
+/// the class, so a component cannot be given a rifle's range or a parachute's canopy by a
+/// mistyped table row: "a tool is the thing you use, an equippable is the thing you fall
+/// with" is a fact about the shape of this enum.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Class {
     /// Goes in the world as this voxel, and is drawn in its colour.
@@ -196,8 +264,8 @@ pub enum Class {
     Tool { color: [f32; 3], using: Use },
     /// Not used on its own — spent making something else.
     Component { color: [f32; 3] },
-    /// Worn, and changes how its wearer moves.
-    Equippable { color: [f32; 3] },
+    /// Held out, and changes how its holder falls.
+    Equippable { color: [f32; 3], falling: Fall },
     /// Ridden.
     Vehicle { color: [f32; 3] },
 }
@@ -385,10 +453,18 @@ impl Item {
                 },
                 recipe: &[(Item::Wood, 2), (Item::Nail, 3)],
             },
+            // Held out, not buckled on: the hotbar cursor is the only equip there is, so
+            // opening the canopy is the d-pad and needs no button of its own. Six blocks a
+            // second is a walk downwards — slow enough that no drop hurts, which
+            // `a_parachute_makes_every_fall_survivable` is what pins.
             Item::Parachute => ItemDef {
                 name: "parachute",
                 class: Equippable {
                     color: [0.92, 0.28, 0.34],
+                    falling: Fall {
+                        max_speed: 6.0,
+                        drift: 1.6,
+                    },
                 },
                 recipe: &[(Item::Leaves, 6), (Item::Nail, 2)],
             },
@@ -417,6 +493,30 @@ impl Item {
         match self.class() {
             Class::Tool { using, .. } => using,
             _ => Use::BARE_HAND,
+        }
+    }
+
+    /// How its holder falls while this is in hand. Everything that is not an equippable
+    /// falls like a person holding nothing, which is what makes gravity one path.
+    pub fn falling(self) -> Fall {
+        match self.class() {
+            Class::Equippable { falling, .. } => falling,
+            _ => Fall::UNAIDED,
+        }
+    }
+
+    /// What this does, in the words the HUD puts beside its name — off whichever dimension
+    /// of the table its class actually has.
+    ///
+    /// One accessor rather than a caller asking each dimension in turn: what a player is
+    /// told a thing does has to come from the same row the thing obeys, and a class with no
+    /// behaviour says nothing rather than something reassuring.
+    pub fn summary(self) -> Option<String> {
+        match self.class() {
+            Class::Block(b) => b.soft().then(|| "soft to land on".to_string()),
+            Class::Tool { using, .. } => using.summary(),
+            Class::Equippable { falling, .. } => falling.summary(),
+            Class::Component { .. } | Class::Vehicle { .. } => None,
         }
     }
 
@@ -450,7 +550,7 @@ impl Item {
             Class::Block(b) => b.color(),
             Class::Tool { color, .. }
             | Class::Component { color }
-            | Class::Equippable { color }
+            | Class::Equippable { color, .. }
             | Class::Vehicle { color } => color,
         }
     }
@@ -683,6 +783,63 @@ mod tests {
         );
     }
 
+    /// The equippables' half of `only_tools_do_anything`: a thing changes a fall exactly
+    /// when it is worn. A parachute in the component column would be a nail that floats.
+    #[test]
+    fn only_equippables_change_a_fall() {
+        for item in Item::ALL {
+            let is_worn = matches!(item.class(), Class::Equippable { .. });
+            assert_eq!(
+                item.falling() != Fall::UNAIDED,
+                is_worn,
+                "{item:?} is a {} that {}",
+                item.class().word(),
+                if is_worn {
+                    "falls like a stone"
+                } else {
+                    "floats"
+                }
+            );
+        }
+    }
+
+    /// A block that gave back everything it took would be a child bouncing on a cushion for
+    /// ever, higher each time. Half of what it took is a trampoline; all of it is a bug.
+    #[test]
+    fn nothing_bounces_higher_than_it_fell() {
+        for block in [
+            Block::Air,
+            Block::Grass,
+            Block::Dirt,
+            Block::Stone,
+            Block::Sand,
+            Block::Wood,
+            Block::Leaves,
+            Block::Bedrock,
+            Block::Cushion,
+        ] {
+            assert!(
+                (0.0..1.0).contains(&block.bounce()),
+                "{block:?} bounces {}",
+                block.bounce()
+            );
+            assert_eq!(block.soft(), block.bounce() > 0.0, "{block:?}");
+        }
+        assert!(Block::Cushion.soft(), "the one thing that is");
+    }
+
+    /// The two things the boyos asked for that change the physics, and the one assertion
+    /// that says they are the only ones: everything else falls and lands like the world.
+    #[test]
+    fn the_cushion_and_the_parachute_are_the_only_soft_things() {
+        let soft: Vec<Item> = Item::ALL
+            .iter()
+            .copied()
+            .filter(|i| i.places().is_some_and(Block::soft) || i.falling() != Fall::UNAIDED)
+            .collect();
+        assert_eq!(soft, vec![Item::Cushion, Item::Parachute]);
+    }
+
     /// The scope has to survive the struct-update the tool rows are written with: a
     /// `..BARE_HAND` under the wrong field is a rifle that reaches 64 blocks and shows you
     /// none of it.
@@ -696,15 +853,15 @@ mod tests {
     /// the button in their hand does.
     #[test]
     fn a_tool_says_what_it_does() {
-        assert_eq!(Item::Nail.using().summary(), None, "a nail is not a tool");
-        assert_eq!(Item::Grass.using().summary(), None);
-        assert_eq!(Item::Hammer.using().summary().unwrap(), "digs 2.5x");
-        assert_eq!(Item::Drill.using().summary().unwrap(), "digs 4x");
-        assert_eq!(Item::Handgun.using().summary().unwrap(), "shoots 24 blocks");
-        assert_eq!(
-            Item::Rifle.using().summary().unwrap(),
-            "shoots 64 blocks, scoped"
-        );
+        assert_eq!(Item::Nail.summary(), None, "a nail is not a tool");
+        assert_eq!(Item::Grass.summary(), None);
+        assert_eq!(Item::Hammer.summary().unwrap(), "digs 2.5x");
+        assert_eq!(Item::Drill.summary().unwrap(), "digs 4x");
+        assert_eq!(Item::Handgun.summary().unwrap(), "shoots 24 blocks");
+        assert_eq!(Item::Rifle.summary().unwrap(), "shoots 64 blocks, scoped");
+        assert_eq!(Item::Cushion.summary().unwrap(), "soft to land on");
+        assert_eq!(Item::Parachute.summary().unwrap(), "floats down and steers");
+        assert_eq!(Item::Car.summary(), None, "a car is not about falling");
     }
 
     #[test]

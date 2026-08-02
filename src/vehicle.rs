@@ -22,6 +22,7 @@
 use bevy::math::{Quat, Vec2, Vec3};
 
 use crate::player;
+use crate::registry::Fall;
 use crate::world::{BlockPos, WORLD_HEIGHT, World};
 
 /// Flat out, in blocks per second. Faster than a sprint is the whole point of a car —
@@ -244,7 +245,8 @@ fn settle(world: &World, mut car: Car, dt: f32) -> Car {
         car.pos.y = rest;
         car.fall = 0.0;
     } else {
-        car.fall = (car.fall + player::GRAVITY * dt).min(player::MAX_FALL_SPEED);
+        // A car wears no parachute, so it falls the way anything falls with nothing on.
+        car.fall = (car.fall + player::GRAVITY * dt).min(Fall::UNAIDED.max_speed);
         car.pos.y = (car.pos.y - car.fall * dt).max(rest);
     }
     car

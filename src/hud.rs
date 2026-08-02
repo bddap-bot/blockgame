@@ -13,6 +13,7 @@ use bevy::prelude::*;
 use crate::game::{Me, NetRole, Peers};
 use crate::inventory::{Held, Inventories};
 use crate::net::{Role, Session};
+use crate::player::{self, Condition};
 use crate::registry::{Class, HOTBAR_COLUMNS, Item};
 
 /// Cell size, in the Deck's 1280x800 pixels. Seven of these across is 766px — wide enough
@@ -184,9 +185,32 @@ pub fn update_status(
     // draws as a tofu box.
     write(
         &mut text,
-        format!("{mode}  |  {} player(s)\n{who}", peers.0.len() + 1),
+        format!(
+            "{mode}  |  {} player(s)  |  {}\n{who}",
+            peers.0.len() + 1,
+            body(me.0.condition)
+        ),
     );
 }
+
+/// The health bar, or what is happening instead of one.
+///
+/// Drawn out of hashes because bevy's built-in font has no heart in it, and a bar of
+/// characters is legible across the room on the Deck's panel where a number is not.
+fn body(condition: Condition) -> String {
+    match condition {
+        Condition::Well { health } => {
+            // Ceiling, so the last sliver of a heart still shows as one: a bar that reads
+            // empty while its owner is up and walking about is a bar that lies.
+            let full = (health.ceil() as usize).min(HEARTS);
+            format!("health [{}{}]", "#".repeat(full), "-".repeat(HEARTS - full))
+        }
+        Condition::Winded { .. } => "winded - catching your breath".to_string(),
+    }
+}
+
+/// Characters wide the health bar is: one per heart.
+const HEARTS: usize = player::MAX_HEALTH as usize;
 
 /// Sets a label, and only when it actually reads differently.
 ///
@@ -273,7 +297,7 @@ pub fn update_hotbar(
 /// player is told the trigger does is read from the same row the trigger obeys.
 fn title(item: Item) -> String {
     let what = item.class().word();
-    match item.using().summary() {
+    match item.summary() {
         Some(does) => format!("{} ({what}, {does})", item.name()),
         None => format!("{} ({what})", item.name()),
     }
@@ -290,10 +314,9 @@ fn using_it(item: Item, owned: u32) -> Option<&'static str> {
     }
     match item.class() {
         Class::Vehicle { .. } => Some("L2 puts it down and picks it up, B drives"),
-        Class::Block(_)
-        | Class::Tool { .. }
-        | Class::Component { .. }
-        | Class::Equippable { .. } => None,
+        // Selecting it *is* opening it, which is the part nobody would guess.
+        Class::Equippable { .. } => Some("pick it before you land, then steer"),
+        Class::Block(_) | Class::Tool { .. } | Class::Component { .. } => None,
     }
 }
 
@@ -359,12 +382,46 @@ mod tests {
     }
 
     /// A tool's row in the registry is what the player is told about it, so the words and
-    /// the behaviour cannot drift.
+    /// the behaviour cannot drift. The two things that change the physics have to say so
+    /// too: a cushion that reads like any other block is a recipe nobody has a reason for.
     #[test]
     fn the_line_says_what_the_trigger_does() {
         assert_eq!(title(Item::Rifle), "rifle (tool, shoots 64 blocks, scoped)");
         assert_eq!(title(Item::Drill), "drill (tool, digs 4x)");
         assert_eq!(title(Item::Nail), "nail (part)", "a nail does nothing");
+        assert_eq!(title(Item::Cushion), "cushion (block, soft to land on)");
+        assert_eq!(
+            title(Item::Parachute),
+            "parachute (wearable, floats down and steers)"
+        );
+        assert_eq!(title(Item::Dirt), "dirt (block)", "dirt is just dirt");
+    }
+
+    /// The one place a child is told they are hurt. Full reads full, a sliver still reads
+    /// as a heart — a bar that empties before its owner is down is a bar that lies — and
+    /// being down says what is happening instead of showing an empty bar.
+    #[test]
+    fn the_health_bar_says_how_hurt_you_are() {
+        assert_eq!(body(Condition::WHOLE), "health [##########]");
+        assert_eq!(body(Condition::Well { health: 4.0 }), "health [####------]");
+        assert_eq!(
+            body(Condition::Well { health: 0.1 }),
+            "health [#---------]",
+            "still standing, so still a heart"
+        );
+        assert_eq!(
+            body(Condition::Winded { left: 1.0 }),
+            "winded - catching your breath"
+        );
+    }
+
+    /// The status line shares the Deck's 1280px panel with nothing, but it is one line and
+    /// the health bar is new on it.
+    #[test]
+    fn the_status_line_fits_the_deck_panel() {
+        // 22px of bevy's default font advances well under 13px a character.
+        let line = format!("driving  |  4 player(s)  |  {}", body(Condition::WHOLE));
+        assert!(line.len() * 13 <= 1280, "{} chars: {line}", line.len());
     }
 
     /// Light cells get dark text, dark cells get light text. Sand is the case that bites:
