@@ -24,6 +24,8 @@ use tokio::sync::{Mutex, mpsc};
 
 use crate::registry::Block;
 use crate::world::{BLOCKS_PER_CHUNK, BlockPos};
+#[cfg(test)]
+use crate::world::{CHUNK_SIZE, ChunkPos, WORLD_HEIGHT};
 pub use wire::{Msg, PlayerId, Pose};
 
 /// Bumped whenever the wire format changes incompatibly — mismatched builds then fail to
@@ -32,9 +34,13 @@ pub use wire::{Msg, PlayerId, Pose};
 /// grew the pose again.
 pub const ALPN: &[u8] = b"bddap-bot/blockgame/3";
 
-/// How long the whole join handshake may take. Not per message: a clock the host restarts
-/// by sending something bounds nothing, and every part it sends is memory the joiner keeps.
-const JOIN_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long the whole join handshake may take: the host's answer *and* the world it then
+/// sends. Not per message — a clock the host restarts by sending something bounds nothing,
+/// and every part it sends is memory the joiner keeps. Generous because it now has the
+/// transfer to cover too, and a well-built world over a relay is a slow minute, not a
+/// hostile one. It bites only on a host that answered and then went quiet: an unreachable
+/// one fails the dial long before this.
+const JOIN_TIMEOUT: Duration = Duration::from_secs(60);
 /// The most world a joining peer will take in before it decides the host is lying.
 ///
 /// `Welcome`'s `parts` is the host's *claim*, and nothing on the wire relates it to
@@ -217,8 +223,9 @@ impl<C: Clone> Links<C> {
         id
     }
 
-    fn contains(&self, id: LinkId) -> bool {
-        self.by_id.contains_key(&id)
+    /// Who is speaking on this link, or `None` if it is already gone.
+    fn sender(&self, id: LinkId) -> Option<PlayerId> {
+        self.by_id.get(&id).map(|l| l.peer)
     }
 
     /// Removes a link and reports whether that was the departing player's last one.
@@ -253,16 +260,22 @@ struct Bus<C = Connection> {
 }
 
 impl<C: Clone> Bus<C> {
-    /// Hands the game a message, and reports whether this link should keep reading.
+    /// Hands the game a message from a link, and reports whether that link should keep
+    /// reading. The link is what names the sender, so no caller can attribute a message to
+    /// a player who did not send it.
     ///
-    /// The liveness check is what makes a departure final. Both this and [`Bus::end_link`]
-    /// hold the links lock across their send, so a message either goes out while its link
-    /// is live — strictly before that link's `Left` — or not at all. Without it, a datagram
-    /// decoded in the moment a link died lands *after* the departure, the game spawns the
-    /// player it has just forgotten, and nothing ever removes it again.
-    async fn deliver(&self, link: LinkId, peer: PlayerId, msg: Msg) -> bool {
+    /// Finding the sender is also the liveness check, and that is what makes a departure
+    /// final. Both this and [`Bus::end_link`] hold the links lock across their send, so a
+    /// message either goes out while its link is live — strictly before that link's `Left` —
+    /// or not at all. Without it, a datagram decoded in the moment a link died lands *after*
+    /// the departure, the game spawns the player it has just forgotten, and nothing ever
+    /// removes it again.
+    async fn deliver(&self, link: LinkId, msg: Msg) -> bool {
         let links = self.links.lock().await;
-        links.contains(link) && self.inbox.send(Event::Message(peer, msg)).is_ok()
+        let Some(peer) = links.sender(link) else {
+            return false;
+        };
+        self.inbox.send(Event::Message(peer, msg)).is_ok()
     }
 
     /// Ends a link, announcing the departure if it was that player's last.
@@ -415,11 +428,19 @@ async fn await_welcome(
                 *remaining = remaining
                     .checked_sub(1)
                     .ok_or_else(|| anyhow!("host sent more world than it promised"))?;
-                // A part is one chunk, and a chunk holds one edit per block. A fatter part
-                // is a host lying about what a chunk is, and the frame limit alone would
-                // let it send four times a chunk's worth.
-                if part.len() > BLOCKS_PER_CHUNK {
-                    anyhow::bail!("a world part holds {} edits, past a chunk", part.len());
+                // A part is *one chunk's* overlay, which holds at most one edit per block.
+                // Both halves matter: the count is what bounds a part against the frame
+                // limit, and one chunk is what bounds what the edits then cost to keep —
+                // scattered across chunks, a part's worth of edits is a per-chunk map each,
+                // an order of magnitude more memory than the edits themselves.
+                if let Some(((first, _), rest)) = part.split_first() {
+                    let chunk = first.chunk();
+                    if part.len() > BLOCKS_PER_CHUNK {
+                        anyhow::bail!("a world part holds {} edits, past a chunk", part.len());
+                    }
+                    if rest.iter().any(|(pos, _)| pos.chunk() != chunk) {
+                        anyhow::bail!("a world part spans more than one chunk");
+                    }
                 }
                 edits.extend(part);
                 // `parts` is a u32 with nothing behind it, so the promise bounds this only
@@ -580,7 +601,7 @@ async fn read_stream(
             buf.extend_from_slice(&chunk[..want]);
         }
         let msg = wire::decode(&buf).context("undecodable message")?;
-        if !bus.deliver(id, peer, msg).await {
+        if !bus.deliver(id, msg).await {
             return Ok(()); // the game is gone, or this link already is
         }
     }
@@ -590,7 +611,7 @@ async fn read_datagrams(conn: Connection, id: LinkId, peer: PlayerId, bus: Arc<B
     while let Ok(bytes) = conn.read_datagram().await {
         match wire::decode(&bytes) {
             Ok(msg) => {
-                if !bus.deliver(id, peer, msg).await {
+                if !bus.deliver(id, msg).await {
                     return;
                 }
             }
@@ -801,12 +822,9 @@ mod tests {
         let peer = id(1);
         let link = link(&mut *bus.links.lock().await, peer, 1);
 
-        assert!(bus.deliver(link, peer, Msg::Hello).await, "a live link");
+        assert!(bus.deliver(link, Msg::Hello).await, "a live link");
         bus.end_link(link).await;
-        assert!(
-            !bus.deliver(link, peer, Msg::Hello).await,
-            "a dead link spoke"
-        );
+        assert!(!bus.deliver(link, Msg::Hello).await, "a dead link spoke");
 
         let seen = drained(&mut inbox);
         assert!(
@@ -827,8 +845,8 @@ mod tests {
         };
 
         bus.end_link(first).await;
-        assert!(!bus.deliver(first, peer, Msg::Hello).await, "the dead one");
-        assert!(bus.deliver(second, peer, Msg::Hello).await, "the live one");
+        assert!(!bus.deliver(first, Msg::Hello).await, "the dead one");
+        assert!(bus.deliver(second, Msg::Hello).await, "the live one");
         bus.end_link(second).await;
 
         let seen = drained(&mut inbox);
@@ -853,16 +871,34 @@ mod tests {
         assert_eq!(links.targets(Target::All).len(), 2);
     }
 
-    /// One chunk's worth of edits: the biggest honest part there is.
+    /// One chunk's worth of edits — every block of the chunk at the origin, which is the
+    /// biggest honest part there is.
     fn a_full_chunk() -> Vec<(BlockPos, Block)> {
-        (0..BLOCKS_PER_CHUNK)
-            .map(|i| (BlockPos::new(i as i32, 0, 0), Block::Stone))
+        (0..BLOCKS_PER_CHUNK as i32)
+            .map(|i| {
+                let pos = BlockPos::new(
+                    i % CHUNK_SIZE,
+                    (i / CHUNK_SIZE) % WORLD_HEIGHT,
+                    i / (CHUNK_SIZE * WORLD_HEIGHT),
+                );
+                assert_eq!(pos.chunk(), ChunkPos::new(0, 0), "{pos:?} left the chunk");
+                (pos, Block::Stone)
+            })
             .collect()
     }
 
     fn say(tx: &mpsc::UnboundedSender<Event>, host: PlayerId, msg: Msg) {
         tx.send(Event::Message(host, msg))
             .expect("the joiner is up");
+    }
+
+    /// What the joiner gave up with. A failure here means it did *not* give up, and
+    /// printing the world it swallowed instead would bury that under a megabyte of blocks.
+    async fn refused(rx: &mut mpsc::UnboundedReceiver<Event>, host: PlayerId) -> String {
+        match await_welcome(rx, host).await {
+            Ok((_, edits)) => panic!("the joiner took all {} edits of it", edits.len()),
+            Err(e) => format!("{e:#}"),
+        }
     }
 
     /// The joiner's buffer is memory a host grows from the other side of the world, and
@@ -892,17 +928,15 @@ mod tests {
         }
         drop(tx);
 
-        let err = await_welcome(&mut rx, host)
-            .await
-            .expect_err("swallowed it");
+        let why = refused(&mut rx, host).await;
         assert!(
-            format!("{err:#}").contains("is sending more world"),
-            "gave up for the wrong reason: {err:#}"
+            why.contains("is sending more world"),
+            "gave up for the wrong reason: {why}"
         );
     }
 
     /// A part is one chunk, and a chunk holds one edit per block. The frame limit alone
-    /// would let a host put four chunks' worth in each part it promised.
+    /// would let a host put two and a half chunks' worth in each part it promised.
     #[tokio::test]
     async fn a_world_part_may_not_outgrow_a_chunk() {
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -912,10 +946,25 @@ mod tests {
         say(&tx, host, Msg::Welcome { seed: 1, parts: 1 });
         say(&tx, host, Msg::WorldPart { edits: fat });
 
-        let err = await_welcome(&mut rx, host)
-            .await
-            .expect_err("swallowed it");
-        assert!(format!("{err:#}").contains("past a chunk"), "{err:#}");
+        let why = refused(&mut rx, host).await;
+        assert!(why.contains("past a chunk"), "{why}");
+    }
+
+    /// A part scattered across chunks is inside every other bound and still the expensive
+    /// lie: each edit becomes a per-chunk map of its own, an order of magnitude more memory
+    /// than the edits themselves. An honest part is one chunk's overlay.
+    #[tokio::test]
+    async fn a_world_part_may_not_span_chunks() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let host = id(9);
+        let scattered = (0..BLOCKS_PER_CHUNK as i32)
+            .map(|i| (BlockPos::new(i * CHUNK_SIZE, 0, 0), Block::Stone))
+            .collect();
+        say(&tx, host, Msg::Welcome { seed: 1, parts: 1 });
+        say(&tx, host, Msg::WorldPart { edits: scattered });
+
+        let why = refused(&mut rx, host).await;
+        assert!(why.contains("more than one chunk"), "{why}");
     }
 
     /// A clock the host restarts by sending something bounds nothing: a host dribbling one
@@ -938,9 +987,7 @@ mod tests {
         });
 
         let started = tokio::time::Instant::now();
-        await_welcome(&mut rx, host)
-            .await
-            .expect_err("waited it out");
+        refused(&mut rx, host).await;
         assert!(
             started.elapsed() <= JOIN_TIMEOUT,
             "the clock restarted: {:?}",

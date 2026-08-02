@@ -22,6 +22,12 @@ arboard = { version = "3", default-features = false, features = ["wayland-data-c
 # A voxel world is meshing-bound and pointer-chasing-heavy: unoptimized dependency code
 # turns a walkable world into a slideshow, so dev builds optimize deps hard and our own
 # crate lightly (fast edit-compile-run for whoever is adding blocks tonight).
+# `start_paused` runs the join-timeout test on a virtual clock instead of a real minute.
+# Named here because a dependency of iroh happens to enable `test-util` for the whole
+# graph, so without this the test compiles today and stops compiling the day they fix it.
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+
 [profile.dev]
 opt-level = 1
 
