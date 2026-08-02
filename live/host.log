@@ -1,0 +1,8 @@
+[2m2026-08-02T12:38:07.298726Z[0m [32m INFO[0m [2mbevy_diagnostic::system_information_diagnostics_plugin::internal[0m[2m:[0m SystemInfo { os: "Linux (NixOS 26.11)", kernel: "6.18.39", cpu: "AMD Ryzen 9 3900X 12-Core Processor", core_count: "12", memory: "31.3 GiB" }
+[2m2026-08-02T12:38:07.314035Z[0m [33m WARN[0m [2mwinit::platform_impl::linux::x11::xdisplay[0m[2m:[0m error setting XSETTINGS; Xft options won't reload automatically
+[2m2026-08-02T12:38:07.326909Z[0m [32m INFO[0m [2mxkbcommon_dl[0m[2m:[0m Failed loading `libxkbcommon-x11.so.0`. Error: CantOpen(DlOpen { desc: "libxkbcommon-x11.so.0: cannot open shared object file: No such file or directory" })
+[2m2026-08-02T12:38:07.326957Z[0m [32m INFO[0m [2mxkbcommon_dl[0m[2m:[0m Failed loading `libxkbcommon-x11.so`. Error: CantOpen(DlOpen { desc: "libxkbcommon-x11.so: cannot open shared object file: No such file or directory" })
+
+thread 'main' (4102939) panicked at /kache/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/xkbcommon-dl-0.4.2/src/x11.rs:59:28:
+Library libxkbcommon-x11.so could not be loaded.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

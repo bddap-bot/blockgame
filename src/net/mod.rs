@@ -602,6 +602,72 @@ mod tests {
         iroh::SecretKey::from_bytes(&[n; 32]).public()
     }
 
+    /// Two games on one machine doing what the front room will do: one hosts, the other
+    /// finds it on the network and joins it, with no ticket typed anywhere.
+    ///
+    /// End to end on purpose — real endpoints, real broadcast, real QUIC — because every
+    /// part of this is a thing that works in isolation and can still fail to meet: a
+    /// beacon nobody hears, an address that is not reachable from the side that got it,
+    /// a handshake that needs a relay the front room does not have.
+    ///
+    /// The host's welcome is answered here rather than by [`crate::game`], because what
+    /// is under test is the joining, not the world.
+    #[test]
+    fn a_game_on_this_network_is_found_and_joined() {
+        const SEED: u64 = 4242;
+        let host = boot(None, SEED, "test-host").expect("hosting");
+        let host_id = host.session.me();
+        let beacon = host.beacon.expect("a host takes the discovery port");
+        let mut session = host.session;
+
+        let serving = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let stop = serving.clone();
+        let host_side = std::thread::spawn(move || {
+            while stop.load(Ordering::Relaxed) {
+                beacon.answer(&session.addr());
+                for event in session.drain() {
+                    if let Event::Message(peer, Msg::Hello) = event {
+                        session.send(
+                            Target::One(peer),
+                            Msg::Welcome {
+                                seed: SEED,
+                                parts: 0,
+                            },
+                        );
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+
+        let mut search = lan::Search::open(lan::PORT).expect("a socket to ask with");
+        let looking_since = std::time::Instant::now();
+        let game = loop {
+            search.ask();
+            std::thread::sleep(Duration::from_millis(100));
+            search.collect();
+            if let Some(game) = search.games().into_iter().find(|g| g.addr.id == host_id) {
+                break game;
+            }
+            assert!(
+                looking_since.elapsed() < Duration::from_secs(10),
+                "the host never turned up on the join menu"
+            );
+        };
+        assert_eq!(game.name, "test-host");
+
+        let joined = boot(Some(game.addr), 0, "test-peer").expect("joining what was found");
+        assert_eq!(joined.seed, SEED, "the joiner did not get the host's world");
+        assert_eq!(joined.role, Role::Peer { host: host_id });
+        assert!(
+            joined.beacon.is_none(),
+            "a peer has no world of its own to announce"
+        );
+
+        serving.store(false, Ordering::Relaxed);
+        host_side.join().expect("the host side");
+    }
+
     /// A link whose "connection" is just a tag, which is all the bookkeeping touches.
     fn link(links: &mut Links<u8>, peer: PlayerId, conn: u8) -> LinkId {
         let (frames, _writer) = mpsc::unbounded_channel();

@@ -267,7 +267,11 @@ mod tests {
         );
 
         search.ask();
-        assert_eq!(beacon.answer(&host), 1, "the question went unanswered");
+        // At least one, not exactly one: [`SHOUT_AT`] asks twice, and whether a machine
+        // hears its own limited broadcast as well as its loopback one is the kernel's
+        // business and the routing table's. A host answering the same asker twice costs
+        // a datagram and is deduplicated by `collect`.
+        assert!(beacon.answer(&host) >= 1, "the question went unanswered");
         // Give the loopback datagram a moment; it is a syscall away, not a network away.
         std::thread::sleep(Duration::from_millis(50));
         search.collect();
