@@ -1,0 +1,24 @@
+{
+  "about": "Touched-path → test-suite map (bothouse#236), read by `botq test-map`. Every landed change must show the commands its touched paths map to, green. First matching rule wins: specific rules above broad ones. `tests: []` means CONSCIOUSLY untested and must carry its why. An unmapped path fails the resolver loud. Commands run from the repo root; lint completeness with `botq test-map --check`.",
+  "rules": [
+    {
+      "paths": ["**/*.md", "**/.gitignore", "LICENSE", "design/**", "test-map.json"],
+      "tests": [],
+      "why": "prose, the licence, the kids' requirement drawings, and this manifest itself — no code to exercise"
+    },
+    {
+      "paths": ["shell.nix", ".github/workflows/**"],
+      "tests": [],
+      "why": "the dev environment and CI definition: every mapped suite below runs inside the nix shell, so a break in it fails those commands loudly, and the workflow proves itself by running on push"
+    },
+    {
+      "paths": ["**/*.rs", "Cargo.toml", "Cargo.lock", ".cargo/config.toml"],
+      "tests": [
+        "nix-shell --run 'cargo fmt --check'",
+        "nix-shell --run 'cargo clippy --quiet --all-targets -- --deny warnings'",
+        "nix-shell --run 'cargo test -q -- --test-threads=2'"
+      ],
+      "why": "one small crate whose modules interlock (the mesher reads the world, the wire format reads the registry), so scoping per-module would miss exactly the cross-module breakage that matters; --test-threads=2 because bothouse's cores are usually contended and the chunk-meshing tests are allocation-heavy"
+    }
+  ]
+}
