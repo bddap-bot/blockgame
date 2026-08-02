@@ -70,13 +70,17 @@ The cushion is a block, so you can build with it. The rest you can make and carr
 everyone else sees what is in your hand — but none of them *does* anything yet. That is
 the next job, one item at a time.
 
+![the hotbar after digging up ten stone and making three nails](docs/hotbar.png)
+
 ## Who you are
 
 <img src="docs/spaceman.png" alt="a blocky white spaceman with teal trim, a dark visor and a rocket on his chest" width="280">
 
 Everyone in the world is this spaceman, drawn from
 [`design/spaceman-avatar.jpg`](design/spaceman-avatar.jpg). He is one table of boxes in
-`src/avatar.rs`; `blockgame portrait` re-renders the picture above from it.
+`src/avatar.rs`; `blockgame portrait` re-renders the picture above from it, and
+`blockgame portrait --holding hammer` shows him carrying something — what everyone else
+sees when you swap what you are holding.
 
 ## How it fits together
 

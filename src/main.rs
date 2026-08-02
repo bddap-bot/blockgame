@@ -47,13 +47,28 @@ enum Command {
     Portrait {
         #[arg(long, default_value = "docs/spaceman.png")]
         out: std::path::PathBuf,
+        /// Put something in his hand — an item name, as the hotbar spells it. Empty-handed
+        /// by default, which is what `docs/spaceman.png` shows.
+        #[arg(long, value_name = "ITEM")]
+        holding: Option<String>,
     },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let join = match cli.command {
-        Some(Command::Portrait { out }) => return portrait::run(out),
+        Some(Command::Portrait { out, holding }) => {
+            // A name nothing answers to is refused here rather than quietly rendering an
+            // empty hand and leaving you to wonder which of the two is broken.
+            let holding = holding
+                .map(|name| {
+                    registry::Item::named(&name).ok_or_else(|| {
+                        anyhow::anyhow!("no item is called {name:?} — see the hotbar for the names")
+                    })
+                })
+                .transpose()?;
+            return portrait::run(out, holding);
+        }
         Some(Command::Join { ticket }) => Some(ticket),
         None => None,
     };

@@ -75,8 +75,10 @@ pub fn setup(mut commands: Commands) {
             position_type: PositionType::Absolute,
             left: Val::Px(16.0),
             top: Val::Px(16.0),
+            padding: UiRect::axes(Val::Px(10.0), Val::Px(4.0)),
             ..default()
         },
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)),
     ));
 
     commands
@@ -90,6 +92,8 @@ pub fn setup(mut commands: Commands) {
             ..default()
         })
         .with_children(|hud| {
+            // On its own dark plate: this line is read against whatever the player
+            // happens to be looking at, and a sunlit sand cliff swallows white text.
             hud.spawn((
                 RecipeText,
                 Text::new(""),
@@ -98,6 +102,11 @@ pub fn setup(mut commands: Commands) {
                     ..default()
                 },
                 TextColor(Color::WHITE),
+                Node {
+                    padding: UiRect::axes(Val::Px(10.0), Val::Px(4.0)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.65)),
             ));
             // Rows of exactly HOTBAR_COLUMNS, so the d-pad's up and down land where they
             // look like they will.

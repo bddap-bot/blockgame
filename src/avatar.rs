@@ -98,7 +98,10 @@ pub const SPACEMAN: &[Part] = &[
 /// really a rifle is a model, and a model is a shape this file does not have yet — but a
 /// coloured block in the hand is enough to see *that* somebody swapped what they are
 /// holding, which is the thing the network has to prove it moved.
-const HELD_AT: [f32; 3] = [0.35, 0.60, -0.10];
+/// Held out in front of the mitten, not inside it: level with the hand and clear of it in
+/// `z`, so the cube is its own silhouette from the front and from either side. Tucked
+/// against the palm it is hidden by the arm from every angle but dead-on.
+const HELD_AT: [f32; 3] = [0.35, 0.66, -0.20];
 const HELD_SIZE: f32 = 0.18;
 
 /// The materials [`SPACEMAN`] paints with. One per [`Skin`], plus one per [`Item`] for

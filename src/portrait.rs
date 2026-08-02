@@ -13,6 +13,7 @@ use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 
 use crate::avatar;
+use crate::registry::Item;
 
 /// Portrait-shaped, because the subject is a standing figure.
 const SIZE: (u32, u32) = (720, 960);
@@ -28,10 +29,15 @@ const SETTLE_FRAMES: u32 = 8;
 #[derive(Resource)]
 struct Out(PathBuf);
 
+/// What to put in the model's hand. A held item is part of the body now, and a table of
+/// numbers you cannot look at is a table of numbers nobody can review.
+#[derive(Resource)]
+struct Holding(Option<Item>);
+
 #[derive(Resource, Default)]
 struct Frame(u32);
 
-pub fn run(out: PathBuf) -> anyhow::Result<()> {
+pub fn run(out: PathBuf, holding: Option<Item>) -> anyhow::Result<()> {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
@@ -43,6 +49,7 @@ pub fn run(out: PathBuf) -> anyhow::Result<()> {
         }))
         .insert_resource(ClearColor(BACKDROP))
         .insert_resource(Out(out))
+        .insert_resource(Holding(holding))
         .init_resource::<Frame>()
         .add_systems(Startup, setup)
         .add_systems(Update, shoot_once_settled)
@@ -54,9 +61,11 @@ fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    holding: Res<Holding>,
 ) {
     let palette = avatar::Palette::new(&mut meshes, &mut materials);
-    avatar::spawn(&mut commands, &palette, Transform::default());
+    let body = avatar::spawn(&mut commands, &palette, Transform::default());
+    avatar::show_held(&mut commands, &palette, body, holding.0);
 
     // A patch of ground to stand on, so the boots read as boots and not as a float.
     commands.spawn((

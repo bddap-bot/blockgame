@@ -362,6 +362,12 @@ impl Item {
         }
     }
 
+    /// The item with this name, for a person typing one on a command line. Read off the
+    /// same table the name came from, so there is no list of spellings to keep in step.
+    pub fn named(name: &str) -> Option<Item> {
+        Item::ALL.iter().copied().find(|i| i.name() == name)
+    }
+
     /// Position in [`Item::ALL`] — the hotbar cursor's coordinate, and the wire id.
     pub fn index(self) -> usize {
         self as usize
