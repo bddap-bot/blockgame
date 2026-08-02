@@ -81,11 +81,36 @@ have one.
 | parachute   | 6 leaves + 2 nails         |
 | car         | 6 wood + 2 stone + 8 nails |
 
-The cushion is a block, so you can build with it, and the car you can drive. The rest you
-can make and carry — everyone else sees what is in your hand — but none of them *does*
-anything yet. That is the next job, one item at a time.
+The cushion is a block you build with, the parachute changes how you fall, and the car you
+drive. The nail is spent in recipes and does nothing on its own — everyone else still sees
+it in your hand.
 
 ![the hotbar after digging up ten stone and making three nails](docs/hotbar.png)
+
+## Falling
+
+Landing hard hurts. A drop of four blocks is free — a jump never costs anything — and past
+that it costs hearts in proportion to how fast you hit the ground, with a thirty-block
+cliff taking a whole player. The bar is in the top-left corner.
+
+Running out is not death. There is nothing to lose and nowhere to wake up: you are flat on
+your back for three seconds, and then you get up where you landed with what those seconds
+healed. Hearts come back on their own the whole time. Nothing else in the game hurts you.
+
+Two things make a fall safe, and they are the two the sheets asked for:
+
+A **cushion** is a block, so you put it where you are going to land. Whatever height you
+fell from, hitting one costs nothing, and it throws you back up about a sixth of the way —
+it is a trampoline as much as a safety mat. One boot on it is enough.
+
+A **parachute** is held, not buckled on: pick its hotbar cell and the canopy is open. You
+come down at six blocks a second, slower than a hop lands at, and the stick carries you
+further sideways than you fall — so a jump off a tower is a glide to somewhere else. Pick
+it *before* you jump; a fall is over in a second or two.
+
+Both are one row of the registry rather than a rule in the game loop. A block says how much
+of a landing it gives back; an equippable says how fast you fall wearing it and what the
+stick is worth on the way down.
 
 ## The car
 
@@ -132,7 +157,7 @@ puts him at the wheel, which is how the seat above got checked.
 | `src/hud.rs`        | crosshair, status line, and the hotbar you craft from            |
 | `src/world.rs`      | chunk storage and seed-deterministic terrain                     |
 | `src/mesh.rs`       | turning voxels into geometry                                     |
-| `src/player.rs`     | movement and collision                                           |
+| `src/player.rs`     | movement, collision, and what a landing costs                    |
 | `src/vehicle.rs`    | the car: driving, and getting in and out of one                  |
 | `src/raycast.rs`    | what you're looking at                                           |
 | `src/avatar.rs`     | **the models** — the spaceman and the car, tables of boxes       |
@@ -162,11 +187,13 @@ and travels over the network with no other file touched.
 A **new block** is the same plus its own half: a `Block` variant, an arm in `Block::def`
 giving it a colour, and an item of class `Block` that places it. Colour lives in the mesh,
 so there are no assets to make, and a variant with no arm fails to compile rather than
-crashing the first time somebody names it.
+crashing the first time somebody names it. A row that says nothing about bouncing is plain
+ground; say `bounce` and it is soft to land on.
 
-What a tool does is three numbers on its row. What a vehicle does is `src/vehicle.rs`, and
-a second one would be that file's constants and a second table in `src/avatar.rs`. What
-something wearable does is still nothing — that is the next job.
+What a tool does is three numbers on its row, and what a wearable does is two more on its
+own — how fast you fall in it, and what the stick is worth while you do. What a vehicle
+does is `src/vehicle.rs`, and a second one would be that file's constants and a second
+table in `src/avatar.rs`.
 
 ## Develop
 
