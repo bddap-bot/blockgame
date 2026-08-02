@@ -17,7 +17,9 @@ pub const CHUNK_SIZE: i32 = 16;
 /// World ceiling. Terrain tops out well below this so there is room to build.
 pub const WORLD_HEIGHT: i32 = 96;
 
-const BLOCKS_PER_CHUNK: usize = (CHUNK_SIZE * WORLD_HEIGHT * CHUNK_SIZE) as usize;
+/// Blocks in one chunk. Also the ceiling on a chunk's edit overlay — one edit per block —
+/// which is what bounds the size of a world transfer (see [`crate::net::wire`]).
+pub const BLOCKS_PER_CHUNK: usize = (CHUNK_SIZE * WORLD_HEIGHT * CHUNK_SIZE) as usize;
 
 /// A block coordinate in world space. `y` is up.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
@@ -95,33 +97,65 @@ impl Chunk {
     }
 }
 
-/// The whole world: loaded chunks plus the authoritative edit log.
+/// How one block differs from what worldgen put there.
 ///
-/// The edit log is the only *world* state multiplayer replicates — player poses travel
-/// too, but they are not the world. A late joiner gets `(seed, edits)` and reconstructs
+/// The generated block is remembered alongside the current one so that putting a block
+/// back the way it was *removes* the edit instead of recording a second one: a player who
+/// digs a hole and fills it in again leaves the world exactly as they found it, and the
+/// log exactly as long. Without that, every no-op edit is permanent.
+#[derive(Clone, Copy)]
+struct Overlay {
+    block: Block,
+    /// `None` until this chunk has been generated once. A joining peer is handed edits
+    /// for chunks it has never loaded, so the baseline is not knowable yet;
+    /// [`World::load_chunk`] fills it in at the moment worldgen runs.
+    generated: Option<Block>,
+}
+
+/// The whole world: loaded chunks plus the edits made to them.
+///
+/// The edits are the only *world* state multiplayer replicates — player poses travel too,
+/// but they are not the world. A late joiner gets the seed and the edits and reconstructs
 /// every block.
+///
+/// Edits are bucketed by chunk, which is what keeps two costs off the critical path:
+/// loading a chunk reads only that chunk's overlay rather than replaying every edit ever
+/// made, and the world travels one bounded frame per chunk instead of one frame that
+/// grows until it cannot be sent at all.
 pub struct World {
     seed: u64,
     chunks: HashMap<ChunkPos, Chunk>,
-    edits: HashMap<BlockPos, Block>,
+    edits: HashMap<ChunkPos, HashMap<BlockPos, Overlay>>,
 }
 
 impl World {
     pub fn new(seed: u64, edits: impl IntoIterator<Item = (BlockPos, Block)>) -> Self {
-        Self {
+        let mut world = Self {
             seed,
             chunks: HashMap::new(),
-            edits: edits.into_iter().collect(),
+            edits: HashMap::new(),
+        };
+        // Through the same door as every other edit: a peer's `Welcome` is untrusted
+        // input, and `set_block` is where an out-of-bounds one is refused.
+        for (pos, block) in edits {
+            world.set_block(pos, block);
         }
+        world
     }
 
     pub fn seed(&self) -> u64 {
         self.seed
     }
 
-    /// Every edit made since worldgen, for handing a joining peer the current world.
-    pub fn edit_log(&self) -> Vec<(BlockPos, Block)> {
-        self.edits.iter().map(|(p, b)| (*p, *b)).collect()
+    /// The world's edits, one batch per chunk — the shape it travels in.
+    ///
+    /// A batch holds at most one edit per block of one chunk, so it has a size ceiling
+    /// ([`BLOCKS_PER_CHUNK`]) that a single whole-world message does not.
+    pub fn overlays(&self) -> Vec<Vec<(BlockPos, Block)>> {
+        self.edits
+            .values()
+            .map(|chunk| chunk.iter().map(|(p, o)| (*p, o.block)).collect())
+            .collect()
     }
 
     pub fn is_loaded(&self, cp: ChunkPos) -> bool {
@@ -140,22 +174,31 @@ impl World {
     }
 
     /// Generates the chunk if it isn't loaded yet. Idempotent.
+    ///
+    /// Costs one worldgen pass plus this chunk's own overlay — never the whole world's
+    /// edits, which would make each load slower as the world was built in and make a
+    /// well-used world stall on every step the player takes.
     pub fn load_chunk(&mut self, cp: ChunkPos) {
         if self.chunks.contains_key(&cp) {
             return;
         }
         let mut chunk = generate_chunk(self.seed, cp);
-        // Replaying the whole edit log per chunk is O(edits) per load. At bones scale
-        // (thousands of edits, hundreds of chunks) that is microseconds; if a saved world
-        // ever grows an edit log worth indexing, bucket it by ChunkPos here.
-        for (pos, block) in &self.edits {
-            if pos.chunk() == cp && (0..WORLD_HEIGHT).contains(&pos.y) {
-                chunk.set(
-                    pos.x.rem_euclid(CHUNK_SIZE),
-                    pos.y,
-                    pos.z.rem_euclid(CHUNK_SIZE),
-                    *block,
-                );
+        if let Some(overlay) = self.edits.get_mut(&cp) {
+            // First sight of what worldgen makes here: learn each baseline, and drop the
+            // edits that turn out to ask for what is already there. That is where a
+            // joiner's log gets pruned, since it arrives with no baselines at all.
+            overlay.retain(|pos, o| {
+                let (lx, lz) = (pos.x.rem_euclid(CHUNK_SIZE), pos.z.rem_euclid(CHUNK_SIZE));
+                let generated = chunk.get(lx, pos.y, lz);
+                o.generated = Some(generated);
+                if o.block == generated {
+                    return false;
+                }
+                chunk.set(lx, pos.y, lz, o.block);
+                true
+            });
+            if overlay.is_empty() {
+                self.edits.remove(&cp);
             }
         }
         self.chunks.insert(cp, chunk);
@@ -199,14 +242,32 @@ impl World {
         if !(0..WORLD_HEIGHT).contains(&pos.y) {
             return false;
         }
-        self.edits.insert(pos, block);
-        if let Some(c) = self.chunks.get_mut(&pos.chunk()) {
-            c.set(
-                pos.x.rem_euclid(CHUNK_SIZE),
-                pos.y,
-                pos.z.rem_euclid(CHUNK_SIZE),
-                block,
-            );
+        let cp = pos.chunk();
+        let (lx, lz) = (pos.x.rem_euclid(CHUNK_SIZE), pos.z.rem_euclid(CHUNK_SIZE));
+        // What worldgen puts here, if that is known yet: an existing edit remembers it,
+        // and otherwise an unedited loaded chunk still holds it.
+        let generated = match self.edits.get(&cp).and_then(|c| c.get(&pos)) {
+            Some(o) => o.generated,
+            None => self.chunks.get(&cp).map(|c| c.get(lx, pos.y, lz)),
+        };
+
+        if let Some(c) = self.chunks.get_mut(&cp) {
+            c.set(lx, pos.y, lz, block);
+        }
+
+        if generated == Some(block) {
+            // Not an edit at all: the world is back the way it was generated.
+            if let Some(overlay) = self.edits.get_mut(&cp) {
+                overlay.remove(&pos);
+                if overlay.is_empty() {
+                    self.edits.remove(&cp);
+                }
+            }
+        } else {
+            self.edits
+                .entry(cp)
+                .or_default()
+                .insert(pos, Overlay { block, generated });
         }
         true
     }
@@ -223,12 +284,32 @@ impl World {
 // state carried between columns, so any peer can regenerate any chunk independently.
 // ---------------------------------------------------------------------------------------
 
-/// Sea-level-ish reference height; beaches sit just above it.
+/// The height terrain varies around — the middle of the hills, not a sea level: there is
+/// no water block for one to mean anything against.
 const BASE_HEIGHT: i32 = 34;
-const SAND_ABOVE: i32 = 2;
+/// Columns topping out at or below this are beach sand; everything higher is grass. A
+/// look, not a shoreline.
+const SAND_UP_TO: i32 = 26;
+
+/// The canopy: one row per layer, as `(offset from the trunk top, horizontal reach)`.
+///
+/// The one description of a canopy's shape. The chunk overscan below and the seam test
+/// both derive from it, so a bigger canopy cannot quietly start getting clipped at chunk
+/// borders.
+const CANOPY: [(i32, i32); 3] = [(-1, 2), (0, 2), (1, 1)];
+
 /// How far a tree's leaves reach, in blocks — the overscan a chunk uses so trees crossing
 /// a chunk border are still complete.
-const TREE_REACH: i32 = 2;
+const TREE_REACH: i32 = {
+    let (mut reach, mut i) = (0, 0);
+    while i < CANOPY.len() {
+        if CANOPY[i].1 > reach {
+            reach = CANOPY[i].1;
+        }
+        i += 1;
+    }
+    reach
+};
 
 fn splitmix64(mut x: u64) -> u64 {
     x = x.wrapping_add(0x9E3779B97F4A7C15);
@@ -279,7 +360,7 @@ pub fn terrain_height(seed: u64, x: i32, z: i32) -> i32 {
 }
 
 fn surface_block(height: i32) -> Block {
-    if height <= BASE_HEIGHT - 10 + SAND_ABOVE {
+    if height <= SAND_UP_TO {
         Block::Sand
     } else {
         Block::Grass
@@ -370,7 +451,7 @@ fn plant_tree(chunk: &mut Chunk, cp: ChunkPos, seed: u64, wx: i32, wz: i32, trun
     for y in (base + 1)..=top {
         put(BlockPos::new(wx, y, wz), Block::Wood, true);
     }
-    for (dy, reach) in [(-1i32, 2i32), (0, 2), (1, 1)] {
+    for (dy, reach) in CANOPY {
         for dz in -reach..=reach {
             for dx in -reach..=reach {
                 // Clip the canopy corners so it reads as a blob, not a cube.
@@ -390,6 +471,11 @@ fn plant_tree(chunk: &mut Chunk, cp: ChunkPos, seed: u64, wx: i32, wz: i32, trun
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// How many blocks differ from worldgen — the world's whole replicated size.
+    fn edit_count(w: &World) -> usize {
+        w.overlays().iter().map(Vec::len).sum()
+    }
 
     #[test]
     fn terrain_is_seed_deterministic() {
@@ -475,11 +561,75 @@ mod tests {
         assert!(host.set_block(dug, Block::Air));
         assert!(host.set_block(built, Block::Stone));
 
-        let mut peer = World::new(99, host.edit_log());
+        let mut peer = World::new(99, host.overlays().concat());
         peer.load_chunk(dug.chunk());
         peer.load_chunk(built.chunk());
         assert_eq!(peer.block(dug), Block::Air);
         assert_eq!(peer.block(built), Block::Stone);
+    }
+
+    /// An edit that puts a block back the way worldgen made it is not an edit. Without
+    /// this, digging a hole and filling it in leaves two entries behind forever — and the
+    /// world's replicated size only ever grows.
+    #[test]
+    fn restoring_a_block_removes_the_edit() {
+        let mut w = World::new(21, []);
+        let cp = ChunkPos::new(0, 0);
+        w.load_chunk(cp);
+        let surface = BlockPos::new(8, terrain_height(21, 8, 8), 8);
+        let was = w.block(surface);
+        assert_eq!(edit_count(&w), 0);
+
+        w.set_block(surface, Block::Air);
+        assert_eq!(edit_count(&w), 1);
+        w.set_block(surface, was);
+        assert_eq!(edit_count(&w), 0, "the world is as generated again");
+        assert_eq!(w.block(surface), was);
+    }
+
+    /// The same, for a peer's edits: they arrive with no idea what worldgen puts there, so
+    /// the pruning has to happen when the chunk is first generated.
+    #[test]
+    fn a_joiners_redundant_edits_are_pruned_on_load() {
+        let seed = 21;
+        let surface = BlockPos::new(8, terrain_height(seed, 8, 8), 8);
+        let mut reference = World::new(seed, []);
+        reference.load_chunk(ChunkPos::new(0, 0));
+        let generated = reference.block(surface);
+
+        let mut w = World::new(
+            seed,
+            [
+                (surface, generated),
+                (BlockPos::new(8, 80, 8), Block::Stone),
+            ],
+        );
+        assert_eq!(edit_count(&w), 2, "nothing is knowable before worldgen");
+        w.load_chunk(ChunkPos::new(0, 0));
+        assert_eq!(edit_count(&w), 1, "the redundant one is gone");
+        assert_eq!(w.block(BlockPos::new(8, 80, 8)), Block::Stone);
+    }
+
+    /// Loading a chunk must not walk edits belonging to other chunks: that is O(all edits)
+    /// per load, which turns a well-built world into a stall on every step the player takes.
+    #[test]
+    fn a_chunk_load_reads_only_its_own_chunks_edits() {
+        let mut w = World::new(5, []);
+        let far = BlockPos::new(500, 80, 500);
+        w.set_block(far, Block::Stone);
+        let near = BlockPos::new(3, 80, 3);
+        w.set_block(near, Block::Wood);
+
+        let batches = w.overlays();
+        assert_eq!(batches.len(), 2, "one batch per edited chunk");
+        assert!(
+            batches.iter().all(|b| b.len() == 1),
+            "each edit is in its own chunk's batch: {batches:?}"
+        );
+
+        w.load_chunk(near.chunk());
+        assert_eq!(w.block(near), Block::Wood);
+        assert_eq!(w.block(far), Block::Air, "the far chunk is not loaded");
     }
 
     /// Edits made before a chunk loads must still be there when it does — the late-joiner
@@ -519,14 +669,16 @@ mod tests {
                 if let Some(trunk) = tree_here(seed, wx, wz) {
                     let top = terrain_height(seed, wx, wz) + trunk;
                     assert_eq!(w.block(BlockPos::new(wx, top, wz)), Block::Wood);
-                    for dz in -2i32..=2 {
-                        for dx in -2i32..=2 {
-                            if dx.abs() == 2 && dz.abs() == 2 {
-                                continue;
+                    for (dy, reach) in CANOPY {
+                        for dz in -reach..=reach {
+                            for dx in -reach..=reach {
+                                if dx.abs() == reach && dz.abs() == reach {
+                                    continue;
+                                }
+                                let p = BlockPos::new(wx + dx, top + dy, wz + dz);
+                                assert!(w.solid(p), "canopy hole at {p:?} for tree ({wx},{wz})");
+                                leaves += 1;
                             }
-                            let p = BlockPos::new(wx + dx, top, wz + dz);
-                            assert!(w.solid(p), "canopy hole at {p:?} for tree ({wx},{wz})");
-                            leaves += 1;
                         }
                     }
                 }

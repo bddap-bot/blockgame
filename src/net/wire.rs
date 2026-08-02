@@ -6,7 +6,7 @@
 //! request/response pair that can drift apart.
 
 use crate::registry::Block;
-use crate::world::BlockPos;
+use crate::world::{BLOCKS_PER_CHUNK, BlockPos};
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
@@ -29,12 +29,16 @@ pub enum Msg {
     /// doesn't surface one to the acceptor until the dialer writes) and asks for the
     /// world.
     Hello,
-    /// Host → peer: everything needed to reconstruct the world. Terrain is a pure
-    /// function of the seed, so only the edits have to travel.
-    Welcome {
-        seed: u64,
-        edits: Vec<(BlockPos, Block)>,
-    },
+    /// Host → peer, the head of the world: the seed, and how many [`Msg::WorldPart`]s
+    /// follow. Terrain is a pure function of the seed, so only the edits have to travel.
+    Welcome { seed: u64, parts: u32 },
+    /// Host → peer: one chunk's edits, sent once per edited chunk after a [`Msg::Welcome`].
+    ///
+    /// The world is split per chunk because a chunk holds at most one edit per block,
+    /// which bounds a part — see [`MAX_FRAME_LEN`]. Sending the whole world in one message
+    /// has no such bound: past about a million edits it cannot be encoded at all, and the
+    /// world becomes permanently unjoinable.
+    WorldPart { edits: Vec<(BlockPos, Block)> },
     /// Peer → host it is an *intent*; host → peer it is *authoritative*. Reliable: a
     /// dropped edit would desync the world permanently.
     Edit { pos: BlockPos, block: Block },
@@ -54,9 +58,18 @@ impl Msg {
     }
 }
 
-/// Ceiling on a single stream frame. `Welcome` is the only message that grows with play,
-/// and at ~16 bytes per edit this allows a million-block build before it bites.
-pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
+/// Bytes one edit costs on the wire: three `i32` of position and the block's `u32` tag.
+const EDIT_LEN: usize = 16;
+
+/// Ceiling on a single stream frame.
+///
+/// [`Msg::WorldPart`] is the only message that grows with play, and it carries one chunk,
+/// which holds at most [`BLOCKS_PER_CHUNK`] edits — so the ceiling is a fact about the
+/// protocol rather than a hope about how much anyone builds. The assertion below is what
+/// keeps it one: a bigger chunk or a wider block tag fails the build instead of quietly
+/// making worlds unjoinable.
+pub const MAX_FRAME_LEN: usize = 1024 * 1024;
+const _: () = assert!(BLOCKS_PER_CHUNK * EDIT_LEN + 64 <= MAX_FRAME_LEN);
 
 /// Datagram payloads must fit QUIC's guaranteed minimum datagram size, which is a little
 /// over a kilobyte before path-MTU discovery grows it. Every datagram-class message is
@@ -136,8 +149,8 @@ mod tests {
         let id = some_id();
         let msgs = [
             Msg::Hello,
-            Msg::Welcome {
-                seed: 7,
+            Msg::Welcome { seed: 7, parts: 3 },
+            Msg::WorldPart {
                 edits: vec![(BlockPos::new(1, 2, 3), Block::Stone)],
             },
             Msg::Edit {
@@ -174,12 +187,26 @@ mod tests {
             }
             .via_datagram()
         );
+        assert!(!Msg::Welcome { seed: 0, parts: 0 }.via_datagram());
+        assert!(!Msg::WorldPart { edits: vec![] }.via_datagram());
+    }
+
+    /// The bound the whole join path rests on: the biggest part a host can ever build —
+    /// every block of one chunk edited — still fits a frame. A world that outgrows the
+    /// frame cannot be sent, and shows up as an unexplained join timeout.
+    #[test]
+    fn the_largest_world_part_fits_a_frame() {
+        let edits: Vec<(BlockPos, Block)> = (0..BLOCKS_PER_CHUNK)
+            .map(|i| {
+                let i = i as i32;
+                (BlockPos::new(i % 16, i / 256, (i / 16) % 16), Block::Stone)
+            })
+            .collect();
+        let n = encode(&Msg::WorldPart { edits }).unwrap().len();
+        assert!(n <= MAX_FRAME_LEN, "a full chunk encodes to {n} bytes");
         assert!(
-            !Msg::Welcome {
-                seed: 0,
-                edits: vec![]
-            }
-            .via_datagram()
+            n / BLOCKS_PER_CHUNK <= EDIT_LEN,
+            "an edit costs more than EDIT_LEN says"
         );
     }
 

@@ -35,10 +35,11 @@ const JOIN_TIMEOUT: Duration = Duration::from_secs(20);
 /// own writer task, so this bounds only that link's own life — a wedged peer never delays
 /// anybody else's traffic, whatever it does with its window.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
-/// Frames a link may have queued before it is considered wedged and dropped. Sends never
+/// Bytes a link may have queued before it is considered wedged and dropped. Sends never
 /// block the game, so a peer that stops reading has to be bounded somewhere; here, where
-/// the memory is.
-const SEND_QUEUE: usize = 64;
+/// the memory is. Bytes rather than frames because that is what actually costs the host,
+/// and because a joining peer is handed one frame per edited chunk at once.
+const SEND_QUEUE_BYTES: usize = 32 * 1024 * 1024;
 /// Inbound connections a host will hold at once. Dialing is cheap and each link costs a
 /// read buffer and two tasks, so this is the ceiling on what a stranger can make a host
 /// allocate.
@@ -135,8 +136,33 @@ type LinkId = u64;
 struct Link<C> {
     peer: PlayerId,
     conn: C,
-    /// Frames waiting for this link's writer task. Bounded — see [`SEND_QUEUE`].
-    outbound: mpsc::Sender<Vec<u8>>,
+    outbound: Outbox,
+}
+
+/// One link's send queue: frames on their way to its writer task, and the bytes they hold.
+///
+/// The count is what bounds the queue — see [`SEND_QUEUE_BYTES`] — and it is shared with
+/// the writer, which subtracts each frame as it goes out.
+#[derive(Clone)]
+struct Outbox {
+    frames: mpsc::UnboundedSender<Vec<u8>>,
+    queued: Arc<AtomicUsize>,
+}
+
+impl Outbox {
+    /// Queues a frame, or reports that this link is too far behind to keep.
+    fn push(&self, frame: Vec<u8>) -> bool {
+        let n = frame.len();
+        if self.queued.fetch_add(n, Ordering::AcqRel) + n > SEND_QUEUE_BYTES {
+            self.queued.fetch_sub(n, Ordering::AcqRel);
+            return false;
+        }
+        if self.frames.send(frame).is_err() {
+            self.queued.fetch_sub(n, Ordering::AcqRel);
+            return false;
+        }
+        true
+    }
 }
 
 /// The live connections, keyed by connection rather than by player.
@@ -176,7 +202,7 @@ impl<C: Clone> Links<C> {
 
     /// Everything a send needs, cloned out so the caller can let go of the lock before it
     /// touches the network.
-    fn targets(&self, to: Target) -> Vec<(C, mpsc::Sender<Vec<u8>>)> {
+    fn targets(&self, to: Target) -> Vec<(C, Outbox)> {
         self.by_id
             .values()
             .filter(|l| match to {
@@ -267,28 +293,53 @@ pub fn boot(join: Option<PlayerId>, seed: u64) -> Result<Boot> {
     })
 }
 
+/// Collects the world: a `Welcome` saying how many parts to expect, then that many
+/// `WorldPart`s.
+///
+/// [`JOIN_TIMEOUT`] bounds the wait for each message rather than the transfer as a whole —
+/// a big world is many frames, and a host that is still feeding them is not a host that
+/// has failed to answer.
 async fn await_welcome(
     inbox: &mut mpsc::UnboundedReceiver<Event>,
     host: PlayerId,
 ) -> Result<(u64, Vec<(BlockPos, Block)>)> {
-    let wait = async {
-        loop {
-            match inbox.recv().await {
-                // Only the endpoint we dialled gets to say what world this is. Anyone
-                // else's `Welcome` would hand a stranger the seed and the whole edit log.
-                Some(Event::Message(from, Msg::Welcome { seed, edits })) if from == host => {
-                    return Ok((seed, edits));
+    let mut world: Option<(u64, u32)> = None;
+    let mut edits = Vec::new();
+    loop {
+        let next = tokio::time::timeout(JOIN_TIMEOUT, inbox.recv())
+            .await
+            .map_err(|_| anyhow!("host went quiet for {JOIN_TIMEOUT:?} during the handshake"))?;
+        // Only the endpoint we dialled gets to say what world this is. Anyone else's
+        // `Welcome` would hand a stranger the seed and every block of the world.
+        let msg = match next {
+            Some(Event::Message(from, msg)) if from == host => msg,
+            // Anything else this early is pre-handshake chatter; the world isn't built
+            // yet, so there is nothing that could consume it.
+            Some(_) => continue,
+            None => return Err(anyhow!("host disconnected during the handshake")),
+        };
+        match msg {
+            Msg::Welcome { seed, parts } => {
+                if world.is_some() {
+                    anyhow::bail!("host sent a second Welcome");
                 }
-                // Anything else this early is pre-handshake chatter; the world isn't
-                // built yet, so there is nothing that could consume it.
-                Some(_) => continue,
-                None => return Err(anyhow!("host disconnected during the handshake")),
+                world = Some((seed, parts));
             }
+            Msg::WorldPart { edits: part } => {
+                let Some((_, remaining)) = world.as_mut() else {
+                    anyhow::bail!("host sent world data before saying what world it is");
+                };
+                *remaining = remaining
+                    .checked_sub(1)
+                    .ok_or_else(|| anyhow!("host sent more world than it promised"))?;
+                edits.extend(part);
+            }
+            _ => continue,
         }
-    };
-    tokio::time::timeout(JOIN_TIMEOUT, wait)
-        .await
-        .map_err(|_| anyhow!("host did not answer within {JOIN_TIMEOUT:?}"))?
+        if let Some((seed, 0)) = world {
+            return Ok((seed, edits));
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -357,14 +408,19 @@ async fn serve_link(conn: Connection, dialed: bool, bus: Arc<Bus>) -> Result<()>
             .context("saying hello")?;
     }
 
-    let (outbound, frames) = mpsc::channel(SEND_QUEUE);
+    let (frames_tx, frames) = mpsc::unbounded_channel();
+    let queued = Arc::new(AtomicUsize::new(0));
+    let outbound = Outbox {
+        frames: frames_tx,
+        queued: queued.clone(),
+    };
     let id = bus.links.lock().await.insert(Link {
         peer,
         conn: conn.clone(),
         outbound,
     });
 
-    let writer = tokio::spawn(write_link(send, frames, conn.clone()));
+    let writer = tokio::spawn(write_link(send, frames, queued, conn.clone()));
     let datagrams = tokio::spawn(read_datagrams(conn.clone(), peer, bus.clone()));
     let result = read_stream(recv, peer, bus.clone()).await;
 
@@ -383,9 +439,16 @@ async fn serve_link(conn: Connection, dialed: bool, bus: Arc<Bus>) -> Result<()>
 
 /// One link's outbound half. Every reliable write happens here and nowhere else, so a
 /// peer that stops reading stalls only its own queue.
-async fn write_link(mut send: SendStream, mut frames: mpsc::Receiver<Vec<u8>>, conn: Connection) {
+async fn write_link(
+    mut send: SendStream,
+    mut frames: mpsc::UnboundedReceiver<Vec<u8>>,
+    queued: Arc<AtomicUsize>,
+    conn: Connection,
+) {
     while let Some(frame) = frames.recv().await {
-        match tokio::time::timeout(WRITE_TIMEOUT, send.write_all(&frame)).await {
+        let result = tokio::time::timeout(WRITE_TIMEOUT, send.write_all(&frame)).await;
+        queued.fetch_sub(frame.len(), Ordering::AcqRel);
+        match result {
             Ok(Ok(())) => {}
             // Closing is what makes the reader loop exit, which is the one place a
             // departure is announced.
@@ -471,7 +534,7 @@ async fn dispatch(bus: Arc<Bus>, mut rx: mpsc::UnboundedReceiver<Outbound>) {
             } else {
                 // A full queue means the peer has stopped absorbing frames; dropping it is
                 // the only alternative to growing the host's memory on its behalf.
-                outbound.try_send(bytes.clone()).is_ok()
+                outbound.push(bytes.clone())
             };
             if !delivered {
                 // Closing makes the link's reader loop exit, which is the one place a
@@ -492,13 +555,33 @@ mod tests {
 
     /// A link whose "connection" is just a tag, which is all the bookkeeping touches.
     fn link(links: &mut Links<u8>, peer: PlayerId, conn: u8) -> LinkId {
-        let (outbound, _held) = mpsc::channel(1);
-        std::mem::forget(_held);
+        let (frames, _writer) = mpsc::unbounded_channel();
         links.insert(Link {
             peer,
             conn,
-            outbound,
+            outbound: Outbox {
+                frames,
+                queued: Arc::new(AtomicUsize::new(0)),
+            },
         })
+    }
+
+    /// A peer that stops reading must cost the host a bounded amount of memory and then
+    /// its link, never an unbounded queue.
+    #[test]
+    fn a_link_that_never_drains_is_bounded() {
+        let (frames, _writer) = mpsc::unbounded_channel();
+        let outbox = Outbox {
+            frames,
+            queued: Arc::new(AtomicUsize::new(0)),
+        };
+        let frame = vec![0u8; 1024 * 1024];
+        let mut queued = 0;
+        while outbox.push(frame.clone()) {
+            queued += frame.len();
+            assert!(queued <= SEND_QUEUE_BYTES, "queue outgrew its bound");
+        }
+        assert!(queued > SEND_QUEUE_BYTES / 2, "gave up far too early");
     }
 
     /// The reconnect race: a peer's second connection arrives before its first has torn

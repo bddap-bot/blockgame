@@ -69,6 +69,42 @@ struct PeerState {
     pos: Vec3,
     /// The model drawing them.
     avatar: Entity,
+    /// What this player is still allowed to change.
+    budget: EditBudget,
+}
+
+/// Edits one peer may ask for per second, sustained.
+const EDIT_RATE: f32 = 10.0;
+/// Edits a peer may ask for at once. A person breaking blocks does one per click, so this
+/// is slack for a laggy burst arriving together, not a play style.
+const EDIT_BURST: f32 = 40.0;
+
+/// A peer's allowance to change the world: a token bucket.
+///
+/// Every edit is permanent world state that the host stores and ships to every future
+/// joiner, so an unlimited edit rate is an unlimited claim on the host's memory and on
+/// everyone's join time. This is where that claim is bounded.
+struct EditBudget {
+    tokens: f32,
+}
+
+impl EditBudget {
+    fn new() -> Self {
+        EditBudget { tokens: EDIT_BURST }
+    }
+
+    fn refill(&mut self, dt: f32) {
+        self.tokens = (self.tokens + EDIT_RATE * dt).min(EDIT_BURST);
+    }
+
+    /// Takes one edit's worth, or reports that this peer is asking too fast.
+    fn spend(&mut self) -> bool {
+        if self.tokens < 1.0 {
+            return false;
+        }
+        self.tokens -= 1.0;
+        true
+    }
 }
 
 #[derive(Component)]
@@ -477,7 +513,7 @@ fn authorized(role: Role, from: PlayerId, msg: &Msg) -> bool {
     match role {
         Role::Peer { host } => from == host,
         Role::Host => match msg {
-            Msg::Welcome { .. } | Msg::PeerLeft { .. } => false,
+            Msg::Welcome { .. } | Msg::WorldPart { .. } | Msg::PeerLeft { .. } => false,
             Msg::Pose { id, .. } => *id == from,
             Msg::Hello | Msg::Edit { .. } => true,
         },
@@ -487,6 +523,7 @@ fn authorized(role: Role, from: PlayerId, msg: &Msg) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn net_receive(
     role: Res<NetRole>,
+    time: Res<Time>,
     mut session: NonSendMut<Session>,
     mut sim: ResMut<Sim>,
     mut chunks: ResMut<Chunks>,
@@ -496,6 +533,10 @@ fn net_receive(
     mut exit: MessageWriter<AppExit>,
 ) {
     let me = session.me();
+    let dt = time.delta_secs();
+    for peer in peers.0.values_mut() {
+        peer.budget.refill(dt);
+    }
 
     for event in session.drain() {
         match event {
@@ -507,29 +548,47 @@ fn net_receive(
                     // Only a host is ever asked for a world; a peer has none to give.
                     Msg::Hello => {
                         if role.0 == Role::Host {
+                            // One frame per edited chunk, announced by a count. A world
+                            // sent as a single message outgrows what can be encoded and
+                            // stops being joinable at all — see `Msg::WorldPart`.
+                            let parts = sim.0.overlays();
                             session.send(
                                 Target::One(from),
                                 Msg::Welcome {
                                     seed: sim.0.seed(),
-                                    edits: sim.0.edit_log(),
+                                    parts: parts.len() as u32,
                                 },
                             );
+                            for edits in parts {
+                                session.send(Target::One(from), Msg::WorldPart { edits });
+                            }
                         }
                     }
+                    // The handshake already collected the world in `net::boot`, so a part
+                    // arriving after it has nothing left to do.
+                    Msg::WorldPart { .. } => {}
                     Msg::Edit { pos, block } => {
                         let edit = match role.0 {
                             // A peer's edit is a request, checked against where that peer
-                            // last said it was standing.
-                            Role::Host => match peers.0.get(&from) {
-                                Some(p) => Edit::Request {
-                                    actor: p.pos,
+                            // last said it was standing, and against what it is still
+                            // allowed to ask for.
+                            Role::Host => {
+                                // Nobody has said where they are yet, so nothing of theirs
+                                // can be checked. Their next pose is a frame away.
+                                let Some(peer) = peers.0.get_mut(&from) else {
+                                    continue;
+                                };
+                                // Asking faster than a person can play: the world is not
+                                // theirs to fill at machine speed.
+                                if !peer.budget.spend() {
+                                    continue;
+                                }
+                                Edit::Request {
+                                    actor: peer.pos,
                                     pos,
                                     block,
-                                },
-                                // Nobody has said where they are yet, so nothing of
-                                // theirs can be checked. Their next pose is a frame away.
-                                None => continue,
-                            },
+                                }
+                            }
                             // `authorized` proved this came from the host, and the host
                             // is the truth.
                             Role::Peer { .. } => Edit::Announcement { pos, block },
@@ -591,7 +650,14 @@ fn track_peer(
         }
         None => {
             let avatar = avatar::spawn(commands, palette, transform);
-            peers.0.insert(id, PeerState { pos, avatar });
+            peers.0.insert(
+                id,
+                PeerState {
+                    pos,
+                    avatar,
+                    budget: EditBudget::new(),
+                },
+            );
         }
     }
 }
@@ -986,11 +1052,34 @@ mod tests {
         assert!(!authorized(
             Role::Host,
             peer,
-            &Msg::Welcome {
-                seed: 0,
-                edits: Vec::new()
-            }
+            &Msg::Welcome { seed: 0, parts: 0 }
         ));
+        assert!(!authorized(
+            Role::Host,
+            peer,
+            &Msg::WorldPart { edits: Vec::new() }
+        ));
+    }
+
+    /// A peer may edit at a person's pace, not a machine's: every edit is world state the
+    /// host keeps forever and ships to every future joiner.
+    #[test]
+    fn a_peer_cannot_edit_faster_than_its_budget() {
+        let mut budget = EditBudget::new();
+        let burst = (0..1000).take_while(|_| budget.spend()).count();
+        assert_eq!(burst as f32, EDIT_BURST, "the burst is the whole allowance");
+        assert!(!budget.spend(), "spent out");
+
+        budget.refill(1.0);
+        let after_a_second = (0..1000).take_while(|_| budget.spend()).count();
+        assert_eq!(after_a_second as f32, EDIT_RATE, "a second buys EDIT_RATE");
+
+        budget.refill(3600.0);
+        assert_eq!(
+            (0..1000).take_while(|_| budget.spend()).count() as f32,
+            EDIT_BURST,
+            "idling does not bank an hour of edits"
+        );
     }
 
     /// Walking in a straight line must not accumulate chunks. Unloading is driven from
