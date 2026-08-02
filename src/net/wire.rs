@@ -16,14 +16,14 @@ pub type PlayerId = iroh::EndpointId;
 
 /// Where a player is and which way they are facing. Sent continuously, over unreliable
 /// datagrams — a lost pose is superseded by the next one a frame later.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Pose {
     pub pos: [f32; 3],
     pub yaw: f32,
     pub pitch: f32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Msg {
     /// Peer → host, first thing on the stream. Opens the bidirectional stream (QUIC
     /// doesn't surface one to the acceptor until the dialer writes) and asks for the
@@ -73,8 +73,9 @@ const _: () = assert!(BLOCKS_PER_CHUNK * EDIT_LEN + 64 <= MAX_FRAME_LEN);
 
 /// Datagram payloads must fit QUIC's guaranteed minimum datagram size, which is a little
 /// over a kilobyte before path-MTU discovery grows it. Every datagram-class message is
-/// fixed-size, so `datagram_messages_fit` proves this statically rather than the encoder
-/// having to fall back to the reliable path at runtime.
+/// fixed-size, so `datagram_messages_fit` can check the whole class by encoding one of
+/// each — which is what lets the sender pick a transport from the message alone, with no
+/// runtime size check and no silent fallback to the reliable path.
 pub const MAX_DATAGRAM_LEN: usize = 1024;
 
 /// Bytes of length prefix in front of every stream frame.
@@ -144,10 +145,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn round_trips() {
+    /// One of every message there is. The `match` is what keeps it complete: a new variant
+    /// stops compiling here, so it cannot be added without joining every test below.
+    fn one_of_each() -> Vec<Msg> {
         let id = some_id();
-        let msgs = [
+        let all = vec![
             Msg::Hello,
             Msg::Welcome { seed: 7, parts: 3 },
             Msg::WorldPart {
@@ -160,35 +162,54 @@ mod tests {
             Msg::Pose { id, pose: pose() },
             Msg::PeerLeft { id },
         ];
-        for m in msgs {
+        for m in &all {
+            match m {
+                Msg::Hello
+                | Msg::Welcome { .. }
+                | Msg::WorldPart { .. }
+                | Msg::Edit { .. }
+                | Msg::Pose { .. }
+                | Msg::PeerLeft { .. } => {}
+            }
+        }
+        all
+    }
+
+    #[test]
+    fn round_trips() {
+        for m in one_of_each() {
             let back = decode(&encode(&m).unwrap()).unwrap();
-            assert_eq!(format!("{m:?}"), format!("{back:?}"));
+            assert_eq!(m, back);
         }
     }
 
     /// The guarantee that lets the sender pick a transport from the message alone, with no
-    /// runtime size check and no silent fallback to the reliable path.
+    /// runtime size check and no silent fallback to the reliable path. Every datagram-class
+    /// message is fixed-size, so one of each is the whole class.
     #[test]
     fn datagram_messages_fit() {
-        let id = some_id();
-        let m = Msg::Pose { id, pose: pose() };
-        assert!(m.via_datagram());
-        let n = encode(&m).unwrap().len();
-        assert!(n <= MAX_DATAGRAM_LEN, "{m:?} encodes to {n} bytes");
+        let datagrams: Vec<Msg> = one_of_each()
+            .into_iter()
+            .filter(Msg::via_datagram)
+            .collect();
+        assert!(!datagrams.is_empty(), "poses ride datagrams");
+        for m in datagrams {
+            let n = encode(&m).unwrap().len();
+            assert!(n <= MAX_DATAGRAM_LEN, "{m:?} encodes to {n} bytes");
+        }
     }
 
+    /// Everything that is not a pose is world state: losing one desyncs the world for
+    /// good, so it has to take the reliable path.
     #[test]
     fn only_pose_traffic_is_unreliable() {
-        assert!(!Msg::Hello.via_datagram());
-        assert!(
-            !Msg::Edit {
-                pos: BlockPos::new(0, 0, 0),
-                block: Block::Air
-            }
-            .via_datagram()
-        );
-        assert!(!Msg::Welcome { seed: 0, parts: 0 }.via_datagram());
-        assert!(!Msg::WorldPart { edits: vec![] }.via_datagram());
+        for m in one_of_each() {
+            assert_eq!(
+                m.via_datagram(),
+                matches!(m, Msg::Pose { .. }),
+                "{m:?} is on the wrong transport"
+            );
+        }
     }
 
     /// The bound the whole join path rests on: the biggest part a host can ever build —

@@ -171,8 +171,12 @@ pub fn run(boot: Boot) -> anyhow::Result<()> {
             .chain(),
     );
 
-    app.run();
-    Ok(())
+    // A bevy error exit is the process's error exit: swallowing it would report success to
+    // whatever launched the game while the window died of something.
+    match app.run() {
+        AppExit::Success => Ok(()),
+        AppExit::Error(code) => Err(anyhow::anyhow!("the game exited with code {code}")),
+    }
 }
 
 fn setup(

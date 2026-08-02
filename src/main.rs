@@ -27,9 +27,10 @@ use clap::{Parser, Subcommand};
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
-    /// World seed. Omit for a new world every time. Ignored when joining — the host's
-    /// world is the one you get.
-    #[arg(long, global = true)]
+    /// World seed. Omit for a new world every time.
+    // Deliberately not `global`: a joiner is told which world it is in, so a seed there is
+    // a request nothing can honour — better refused by the parser than silently dropped.
+    #[arg(long)]
     seed: Option<u64>,
 }
 
@@ -60,9 +61,13 @@ fn main() -> Result<()> {
 
 /// A different world each launch. Only the host ever picks one — everyone else is told
 /// which world they are in, so this never has to agree across machines.
+///
+/// A clock before 1970 is not a world seed to fall back from: silently substituting a
+/// fixed one would hand everybody on that machine the same world for ever, looking like a
+/// worldgen bug rather than a broken clock.
 fn fresh_seed() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0x5EED)
+        .expect("the system clock reads before 1970")
+        .as_nanos() as u64
 }
