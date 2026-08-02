@@ -13,8 +13,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      # bevy's linux build needs alsa and udev headers even for `cargo check`.
-      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
+      # bevy's linux build links audio, input, and both display stacks — the headers are
+      # needed even for `cargo clippy`, since winit's deps probe them from build scripts.
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- --deny warnings
       - run: cargo test -- --test-threads=2
