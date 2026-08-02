@@ -64,16 +64,53 @@ pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 /// having to fall back to the reliable path at runtime.
 pub const MAX_DATAGRAM_LEN: usize = 1024;
 
+/// Bytes of length prefix in front of every stream frame.
+pub const LEN_PREFIX: usize = 4;
+
+/// The codec, in one place so the reader and the writer cannot drift.
+///
+/// Fixint little-endian is the format on the wire. The two properties that are *not*
+/// `bincode::serialize`'s defaults are the point of naming it here: a limit, so a decode
+/// cannot be talked into allocating more than a frame may hold, and reject-trailing, so a
+/// frame padded out to the maximum is an error rather than a valid message with megabytes
+/// of free ballast attached.
+fn codec() -> impl bincode::Options {
+    use bincode::Options;
+    bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .with_limit(MAX_FRAME_LEN as u64)
+}
+
 pub fn encode(msg: &Msg) -> Result<Vec<u8>> {
-    let bytes = bincode::serialize(msg)?;
-    if bytes.len() > MAX_FRAME_LEN {
-        bail!("message too large to send: {} bytes", bytes.len());
-    }
-    Ok(bytes)
+    use bincode::Options;
+    Ok(codec().serialize(msg)?)
 }
 
 pub fn decode(bytes: &[u8]) -> Result<Msg> {
-    Ok(bincode::deserialize(bytes)?)
+    use bincode::Options;
+    Ok(codec().deserialize(bytes)?)
+}
+
+/// A whole stream frame: length prefix then payload. The one place framing is written —
+/// [`frame_len`] is the one place it is read.
+pub fn encode_frame(msg: &Msg) -> Result<Vec<u8>> {
+    let payload = encode(msg)?;
+    let mut frame = Vec::with_capacity(payload.len() + LEN_PREFIX);
+    frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    frame.extend_from_slice(&payload);
+    Ok(frame)
+}
+
+/// Payload length a frame header claims, refusing anything past [`MAX_FRAME_LEN`].
+///
+/// The claim is a peer's word about bytes it has not sent yet, so the reader must not turn
+/// it into an allocation — see `net::read_stream`, which grows its buffer as bytes arrive.
+pub fn frame_len(header: [u8; LEN_PREFIX]) -> Result<usize> {
+    let len = u32::from_le_bytes(header) as usize;
+    if len > MAX_FRAME_LEN {
+        bail!("oversized frame: {len} bytes");
+    }
+    Ok(len)
 }
 
 #[cfg(test)]
@@ -152,6 +189,10 @@ mod tests {
     }
 
     /// A peer on a newer build must not be able to name a block this build doesn't have.
+    ///
+    /// The block rides last, as a little-endian u32 variant index, so the *first* of those
+    /// four bytes is the id — overwriting the last one instead only ever tests a wildly
+    /// out-of-range tag, which any decoder rejects for free.
     #[test]
     fn unknown_block_ids_are_rejected() {
         let mut bytes = encode(&Msg::Edit {
@@ -159,7 +200,42 @@ mod tests {
             block: Block::Stone,
         })
         .unwrap();
-        *bytes.last_mut().unwrap() = 200;
+        let id = bytes.len() - 4;
+        assert_eq!(
+            bytes[id..],
+            [Block::Stone as u8, 0, 0, 0],
+            "block tag layout"
+        );
+        // One past the last block this build knows: the off-by-one a newer peer would send.
+        bytes[id] = crate::registry::BLOCKS.len() as u8;
         assert!(decode(&bytes).is_err());
+    }
+
+    /// A frame padded out with junk must not decode. Otherwise a one-byte message can be
+    /// sent as a maximum-size frame, and the allocation it costs the receiver is never
+    /// even punished with an error.
+    #[test]
+    fn trailing_bytes_are_rejected() {
+        let mut bytes = encode(&Msg::Hello).unwrap();
+        assert!(decode(&bytes).is_ok());
+        bytes.extend_from_slice(&[0u8; 64]);
+        assert!(decode(&bytes).is_err(), "padding decoded as a valid Hello");
+    }
+
+    #[test]
+    fn a_frame_carries_its_own_length() {
+        let frame = encode_frame(&Msg::Hello).unwrap();
+        let header: [u8; LEN_PREFIX] = frame[..LEN_PREFIX].try_into().unwrap();
+        let len = frame_len(header).unwrap();
+        assert_eq!(len, frame.len() - LEN_PREFIX);
+        assert!(!decode(&frame[LEN_PREFIX..]).unwrap().via_datagram());
+    }
+
+    /// The header is a peer's unverified claim, and the reader sizes its buffer from it.
+    #[test]
+    fn an_oversized_frame_header_is_refused() {
+        assert!(frame_len((MAX_FRAME_LEN as u32).to_le_bytes()).is_ok());
+        assert!(frame_len((MAX_FRAME_LEN as u32 + 1).to_le_bytes()).is_err());
+        assert!(frame_len(u32::MAX.to_le_bytes()).is_err());
     }
 }
