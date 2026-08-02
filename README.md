@@ -45,6 +45,14 @@ joining player ignores their own seed and gets the host's world.
 
 You start in the air, flying. Press `F` to drop into walking.
 
+## Who you are
+
+<img src="docs/spaceman.png" alt="a blocky white spaceman with teal trim, a dark visor and a rocket on his chest" width="280">
+
+Everyone in the world is this spaceman, drawn from
+[`design/spaceman-avatar.jpg`](design/spaceman-avatar.jpg). He is one table of boxes in
+`src/avatar.rs`; `blockgame portrait` re-renders the picture above from it.
+
 ## How it fits together
 
 | file                | what it owns                                                    |
@@ -55,6 +63,7 @@ You start in the air, flying. Press `F` to drop into walking.
 | `src/player.rs`     | movement and collision                                           |
 | `src/raycast.rs`    | what you're looking at                                           |
 | `src/avatar.rs`     | **the player model** — one table of boxes                        |
+| `src/portrait.rs`   | `blockgame portrait` — renders that model to `docs/spaceman.png` |
 | `src/input.rs`      | keyboard/mouse/gamepad → one `Intent`                            |
 | `src/net/`          | the iroh message bus and wire format                             |
 | `src/game.rs`       | the Bevy app that wires the above together                       |
