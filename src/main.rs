@@ -55,6 +55,11 @@ fn main() -> Result<()> {
         Some(Command::Join { ticket }) => Some(ticket),
         None => None,
     };
+    // `--seed` before the subcommand still parses, and a joiner is told which world it is
+    // in, so honouring it is impossible and ignoring it is a lie.
+    if join.is_some() && cli.seed.is_some() {
+        anyhow::bail!("--seed picks a world to host; a joiner gets the host's world");
+    }
     let seed = cli.seed.unwrap_or_else(fresh_seed);
     game::run(net::boot(join, seed)?)
 }

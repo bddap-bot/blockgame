@@ -66,12 +66,16 @@ struct WorldMaterial(Handle<StandardMaterial>);
 struct Peers(HashMap<PlayerId, PeerState>);
 
 struct PeerState {
-    /// Feet position from this player's most recent [`Msg::Pose`].
+    /// Feet position from this player's most recent believed [`Msg::Pose`].
     pos: Vec3,
     /// The model drawing them.
     avatar: Entity,
     /// What this player is still allowed to change.
-    budget: EditBudget,
+    budget: Budget,
+    /// How far this player may still claim to have moved. A pose is a claim, and every
+    /// rule about *where* a peer may edit is checked against it, so a client that simply
+    /// says it is standing across the map would otherwise reach across the map.
+    travel: Budget,
 }
 
 /// Edits one peer may ask for per second, sustained.
@@ -79,34 +83,68 @@ const EDIT_RATE: f32 = 10.0;
 /// Edits a peer may ask for at once. A person breaking blocks does one per click, so this
 /// is slack for a laggy burst arriving together, not a play style.
 const EDIT_BURST: f32 = 40.0;
+/// Edits per second across *everyone*. Identities are free — a peer can reconnect, or
+/// arrive under a new key, and be handed a fresh per-peer bucket — so the world's growth
+/// has to be bounded by something no identity resets.
+const WORLD_EDIT_RATE: f32 = 40.0;
+const WORLD_EDIT_BURST: f32 = 200.0;
+// Four busy players' worth: past that the bound has to come from somewhere no identity
+// resets, and it does.
+const _: () = assert!(WORLD_EDIT_RATE < EDIT_RATE * 8.0);
+/// Blocks per second a peer may claim to have travelled, and the jump one pose may make.
+/// Well over [`player::FLY_SPEED`], because a pose lost on the wire is not resent: the
+/// next one has to cover the gap.
+const TRAVEL_RATE: f32 = player::FLY_SPEED * 3.0;
+const TRAVEL_BURST: f32 = 64.0;
 
-/// A peer's allowance to change the world: a token bucket.
+/// An allowance that refills with time: a token bucket.
 ///
-/// Every edit is permanent world state that the host stores and ships to every future
-/// joiner, so an unlimited edit rate is an unlimited claim on the host's memory and on
-/// everyone's join time. This is where that claim is bounded.
-struct EditBudget {
+/// Two things a peer must not have for free: edits, which are permanent world state the
+/// host stores and ships to every future joiner, and movement, which is what every
+/// proximity rule is checked against.
+struct Budget {
     tokens: f32,
+    rate: f32,
+    max: f32,
 }
 
-impl EditBudget {
-    fn new() -> Self {
-        EditBudget { tokens: EDIT_BURST }
+impl Budget {
+    fn new(rate: f32, max: f32) -> Self {
+        Budget {
+            tokens: max,
+            rate,
+            max,
+        }
     }
 
     fn refill(&mut self, dt: f32) {
-        self.tokens = (self.tokens + EDIT_RATE * dt).min(EDIT_BURST);
+        self.tokens = (self.tokens + self.rate * dt).min(self.max);
     }
 
-    /// Takes one edit's worth, or reports that this peer is asking too fast.
-    fn spend(&mut self) -> bool {
-        if self.tokens < 1.0 {
+    /// Takes `cost`, or reports that this peer is asking for too much too fast.
+    fn spend(&mut self, cost: f32) -> bool {
+        if self.tokens < cost {
             return false;
         }
-        self.tokens -= 1.0;
+        self.tokens -= cost;
         true
     }
 }
+
+/// The world's own edit allowance, which no reconnect and no new identity resets.
+#[derive(Resource)]
+struct WorldBudget(Budget);
+
+impl Default for WorldBudget {
+    fn default() -> Self {
+        WorldBudget(Budget::new(WORLD_EDIT_RATE, WORLD_EDIT_BURST))
+    }
+}
+
+/// Peers already handed the world. `Msg::Hello` costs the host a copy of every edit and a
+/// frame per edited chunk, so it is answered once per visit, not once per ask.
+#[derive(Resource, Default)]
+struct Welcomed(HashSet<PlayerId>);
 
 #[derive(Component)]
 struct ChunkTag;
@@ -153,6 +191,8 @@ pub fn run(boot: Boot) -> anyhow::Result<()> {
     .init_resource::<Held>()
     .init_resource::<Chunks>()
     .init_resource::<Peers>()
+    .init_resource::<Welcomed>()
+    .init_resource::<WorldBudget>()
     .insert_non_send_resource(session)
     .add_systems(Startup, setup)
     .add_systems(
@@ -395,6 +435,12 @@ fn apply_if_legal(
     pos: BlockPos,
     block: Block,
 ) -> bool {
+    // Every rule below asks the world what is already there, and an unloaded chunk answers
+    // `Air`: bedrock unprotected, occupied space "empty". Peers edit far from wherever the
+    // host's own player happens to be standing, so the host generates the chunk it is being
+    // asked about rather than deciding blind. `stream_chunks` drops it again on its next
+    // pass if nobody is near it.
+    sim.load_chunk(pos.chunk());
     if !edit_is_legal(sim, actor, standing, pos, block) || !sim.set_block(pos, block) {
         return false;
     }
@@ -559,14 +605,18 @@ fn net_receive(
     mut sim: ResMut<Sim>,
     mut chunks: ResMut<Chunks>,
     mut peers: ResMut<Peers>,
+    mut welcomed: ResMut<Welcomed>,
+    mut world_budget: ResMut<WorldBudget>,
     palette: Res<avatar::Palette>,
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
 ) {
     let me = session.me();
     let dt = time.delta_secs();
+    world_budget.0.refill(dt);
     for peer in peers.0.values_mut() {
         peer.budget.refill(dt);
+        peer.travel.refill(dt);
     }
 
     for event in session.drain() {
@@ -578,7 +628,10 @@ fn net_receive(
                 match msg {
                     // Only a host is ever asked for a world; a peer has none to give.
                     Msg::Hello => {
-                        if role.0 == Role::Host {
+                        // Answering costs a copy of every edit in the world and a frame
+                        // per edited chunk, so a peer that keeps asking is answered once.
+                        // Their link ending forgets them, so a real reconnect is served.
+                        if role.0 == Role::Host && welcomed.0.insert(from) {
                             // One frame per edited chunk, announced by a count. A world
                             // sent as a single message outgrows what can be encoded and
                             // stops being joinable at all — see `Msg::WorldPart`.
@@ -610,8 +663,10 @@ fn net_receive(
                                     continue;
                                 };
                                 // Asking faster than a person can play: the world is not
-                                // theirs to fill at machine speed.
-                                if !peer.budget.spend() {
+                                // theirs to fill at machine speed. Both buckets, because
+                                // the per-peer one is only as strong as identities are
+                                // scarce, and they are free.
+                                if !peer.budget.spend(1.0) || !world_budget.0.spend(1.0) {
                                     continue;
                                 }
                                 Edit::Request {
@@ -636,7 +691,10 @@ fn net_receive(
                             track_peer(&mut commands, &mut peers, &palette, id, pose);
                         }
                     }
-                    Msg::PeerLeft { id } => forget_peer(&mut commands, &mut peers, id),
+                    Msg::PeerLeft { id } => {
+                        welcomed.0.remove(&id);
+                        forget_peer(&mut commands, &mut peers, id);
+                    }
                     // The handshake already happened in `net::boot`, so a second Welcome
                     // has nothing left to do.
                     Msg::Welcome { .. } => {}
@@ -645,6 +703,7 @@ fn net_receive(
             Event::Left(id) => match role.0 {
                 Role::Host => {
                     session.send(Target::All, Msg::PeerLeft { id });
+                    welcomed.0.remove(&id);
                     forget_peer(&mut commands, &mut peers, id);
                 }
                 // A peer only ever links to the host, but a departure that is not the
@@ -661,6 +720,11 @@ fn net_receive(
 }
 
 /// Records where a player is and keeps their model there, spawning it the first time.
+///
+/// A pose is a *claim*, and on the host it is what every proximity rule is checked
+/// against, so a claim that outruns [`TRAVEL_RATE`] is refused: without that, a modified
+/// client says it is standing anywhere and edits anything, and no reach check means a
+/// thing. The first pose is where they say they spawned, which nothing can contradict.
 fn track_peer(
     commands: &mut Commands,
     peers: &mut Peers,
@@ -677,6 +741,9 @@ fn track_peer(
     };
     match peers.0.get_mut(&id) {
         Some(p) => {
+            if !p.travel.spend(p.pos.distance(pos)) {
+                return;
+            }
             p.pos = pos;
             commands.entity(p.avatar).insert(transform);
         }
@@ -687,7 +754,8 @@ fn track_peer(
                 PeerState {
                     pos,
                     avatar,
-                    budget: EditBudget::new(),
+                    budget: Budget::new(EDIT_RATE, EDIT_BURST),
+                    travel: Budget::new(TRAVEL_RATE, TRAVEL_BURST),
                 },
             );
         }
@@ -1065,6 +1133,37 @@ mod tests {
         );
     }
 
+    /// The rules ask the world what is already there, and an unloaded chunk answers
+    /// `Air` — so a peer editing anywhere the host's own player is not standing would get
+    /// bedrock unprotected and every occupied block "empty". Peers are mostly somewhere
+    /// else, so this is the ordinary case, not the corner.
+    #[test]
+    fn an_edit_in_an_unloaded_chunk_is_still_checked() {
+        let far = ChunkPos::new(40, -17);
+        let mut world = World::new(4, []);
+        let mut chunks = Chunks::default();
+        assert!(!world.is_loaded(far), "the host is nowhere near this");
+
+        // Standing on the bedrock over there, so reach cannot be what refuses it.
+        let floor = BlockPos::new(far.origin().x + 8, 0, far.origin().z + 8);
+        let feet = floor.center() + Vec3::Y * 0.5;
+        assert!(
+            !apply_alone(&mut world, &mut chunks, feet, floor, Block::Air),
+            "broke the floor of a world the host had not looked at"
+        );
+
+        // ... and the ground next to it is not empty space to build into, either.
+        let ground = BlockPos::new(floor.x, world.ground_height(floor.x, floor.z), floor.z);
+        let feet = ground.center() + Vec3::Y * 1.0;
+        assert!(!apply_alone(
+            &mut world,
+            &mut chunks,
+            feet,
+            ground,
+            Block::Stone
+        ));
+    }
+
     #[test]
     fn the_host_applies_a_legal_edit() {
         let (mut world, mut chunks, feet, surface) = standing_in_a_loaded_world();
@@ -1178,21 +1277,48 @@ mod tests {
     /// host keeps forever and ships to every future joiner.
     #[test]
     fn a_peer_cannot_edit_faster_than_its_budget() {
-        let mut budget = EditBudget::new();
-        let burst = (0..1000).take_while(|_| budget.spend()).count();
+        let mut budget = Budget::new(EDIT_RATE, EDIT_BURST);
+        let burst = (0..1000).take_while(|_| budget.spend(1.0)).count();
         assert_eq!(burst as f32, EDIT_BURST, "the burst is the whole allowance");
-        assert!(!budget.spend(), "spent out");
+        assert!(!budget.spend(1.0), "spent out");
 
         budget.refill(1.0);
-        let after_a_second = (0..1000).take_while(|_| budget.spend()).count();
+        let after_a_second = (0..1000).take_while(|_| budget.spend(1.0)).count();
         assert_eq!(after_a_second as f32, EDIT_RATE, "a second buys EDIT_RATE");
 
         budget.refill(3600.0);
         assert_eq!(
-            (0..1000).take_while(|_| budget.spend()).count() as f32,
+            (0..1000).take_while(|_| budget.spend(1.0)).count() as f32,
             EDIT_BURST,
             "idling does not bank an hour of edits"
         );
+    }
+
+    /// A pose is a claim, and the host checks every proximity rule against it. Believing
+    /// one that teleports across the map is the same as having no reach rule at all.
+    #[test]
+    fn a_peer_cannot_claim_to_have_teleported() {
+        let mut travel = Budget::new(TRAVEL_RATE, TRAVEL_BURST);
+        assert!(
+            !travel.spend(10_000.0),
+            "a jump across the map is not a step"
+        );
+        assert!(travel.spend(TRAVEL_BURST), "an honest sprint is fine");
+        assert!(!travel.spend(1.0), "and it is spent");
+        travel.refill(1.0);
+        assert!(
+            travel.spend(TRAVEL_RATE) && !travel.spend(1.0),
+            "a second of standing still buys a second of flying"
+        );
+    }
+
+    /// Identities are free, so a bucket keyed by one is only ever half the bound: N fresh
+    /// keys buy N times the edit rate unless something counts the world's own.
+    #[test]
+    fn the_world_has_an_edit_budget_of_its_own() {
+        let mut world = WorldBudget::default().0;
+        let burst = (0..10_000).take_while(|_| world.spend(1.0)).count();
+        assert_eq!(burst as f32, WORLD_EDIT_BURST);
     }
 
     /// Walking in a straight line must not accumulate chunks. Unloading is driven from

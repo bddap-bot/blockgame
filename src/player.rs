@@ -338,13 +338,18 @@ fn push_out(world: &World, pos: Vec3) -> Vec3 {
         Vec3::Z * (hull_min.z - max.z - SKIN),
     ];
     ways.sort_by(|a, b| a.length_squared().total_cmp(&b.length_squared()));
-    // Shallowest first, and out into space the player can actually stand in. A buried
-    // player has no such way out; the shallowest step still walks them toward the surface,
-    // and this runs again next frame.
-    let escape = ways
+    // Shallowest first, and out into space the player can actually stand in.
+    if let Some(escape) = ways
         .into_iter()
-        .find(|w| overlap(world, pos + *w) == Overlap::None);
-    pos + escape.unwrap_or(ways[0])
+        .find(|w| overlap(world, pos + *w) == Overlap::None)
+    {
+        return pos + escape;
+    }
+    // Buried, with no single step that reaches open space. Climbing is the one direction
+    // that always ends somewhere standable, and it is monotone: taking the shallowest way
+    // out instead swaps which side is shallowest each frame, and the player oscillates
+    // between two points for ever — which is being stuck, with jitter.
+    pos + Vec3::Y
 }
 
 /// A spawn point above the terrain at `(x, z)`, in world space.
@@ -513,6 +518,38 @@ mod tests {
             (out - feet).length() < 1.5,
             "a step out, not a teleport: {out}"
         );
+    }
+
+    /// Buried, with no single step to open space — a joiner spawning inside somebody's
+    /// build. Pushing out the shallowest way swaps sides every frame and leaves them
+    /// oscillating between two points for ever, which is stuck with jitter; climbing gets
+    /// them out. Nothing else can: from inside a block the raycast has nothing to target,
+    /// so they cannot dig their way free either.
+    #[test]
+    fn a_buried_player_climbs_out() {
+        let mut w = floor_world();
+        for y in 11..20 {
+            for z in 6..11 {
+                for x in 6..11 {
+                    w.set_block(BlockPos::new(x, y, z), Block::Stone);
+                }
+            }
+        }
+        let mut pos = Vec3::new(8.5, 14.0, 8.5);
+        assert_eq!(
+            overlap(&w, pos),
+            Overlap::Solid,
+            "the test needs them stuck"
+        );
+
+        // One frame of standing still, repeatedly — the game's own loop.
+        for _ in 0..40 {
+            pos = move_and_slide(&w, pos, Vec3::ZERO).pos;
+            if overlap(&w, pos) == Overlap::None {
+                return;
+            }
+        }
+        panic!("never got out; ended at {pos}");
     }
 
     #[test]

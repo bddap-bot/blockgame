@@ -31,6 +31,8 @@ pub const ALPN: &[u8] = b"bddap-bot/blockgame/1";
 
 /// How long a joining peer waits for the host's `Welcome` before giving up.
 const JOIN_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long an accepted connection has to open its stream before its slot is taken back.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// A peer that can't absorb a reliable frame in this long is dropped. Each link has its
 /// own writer task, so this bounds only that link's own life — a wedged peer never delays
 /// anybody else's traffic, whatever it does with its window.
@@ -313,6 +315,11 @@ async fn await_welcome(
         // `Welcome` would hand a stranger the seed and every block of the world.
         let msg = match next {
             Some(Event::Message(from, msg)) if from == host => msg,
+            // Waiting out the full timeout for a host that has already hung up tells the
+            // player "no answer" when the truth is "the door shut".
+            Some(Event::Left(id)) if id == host => {
+                return Err(anyhow!("host disconnected during the handshake"));
+            }
             // Anything else this early is pre-handshake chatter; the world isn't built
             // yet, so there is nothing that could consume it.
             Some(_) => continue,
@@ -397,7 +404,13 @@ async fn serve_link(conn: Connection, dialed: bool, bus: Arc<Bus>) -> Result<()>
     let (mut send, recv) = if dialed {
         conn.open_bi().await.context("opening the stream")?
     } else {
-        conn.accept_bi().await.context("accepting the stream")?
+        // Bounded: the inbound slot is already claimed by the time we are here, so a
+        // stranger who connects and then opens no stream would otherwise hold one of the
+        // host's [`MAX_INBOUND_LINKS`] for as long as it cares to keep the connection alive.
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, conn.accept_bi())
+            .await
+            .map_err(|_| anyhow!("peer {peer} opened no stream within {HANDSHAKE_TIMEOUT:?}"))?
+            .context("accepting the stream")?
     };
 
     // QUIC doesn't surface an opened stream to the acceptor until the dialer writes, so
