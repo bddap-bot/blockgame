@@ -69,12 +69,28 @@ struct Chunks {
 #[derive(Resource)]
 struct WorldMaterial(Handle<StandardMaterial>);
 
-/// Everyone else in this world. Their position is game state, not just something to draw:
-/// the host checks each peer's edits against where that peer last said it was.
+/// Everyone else in this world, exactly as the host last declared them — see
+/// [`Msg::Present`]. Their position is game state, not just something to draw: the host
+/// checks each peer's edits against where that peer last said it was.
 #[derive(Resource, Default)]
 pub struct Peers(pub HashMap<PlayerId, PeerState>);
 
 pub struct PeerState {
+    /// Where they are and what they look like, or `None` for somebody who has not posed
+    /// yet. Presence and position are separate facts because they arrive separately and
+    /// only one of them is ordered: a player exists from the moment the host says so, and
+    /// there is nothing to draw or to check an edit against until they say where they are.
+    seen: Option<Seen>,
+    /// What this player is still allowed to change.
+    budget: Budget,
+    /// How far this player may still claim to have moved. A pose is a claim, and every
+    /// rule about *where* a peer may edit is checked against it, so a client that simply
+    /// says it is standing across the map would otherwise reach across the map.
+    travel: Budget,
+}
+
+/// Everything a player's poses say about them, which exists once they have sent one.
+struct Seen {
     /// Feet position from this player's most recent believed [`Msg::Pose`].
     pos: Vec3,
     /// Their car, if they have one out — where it is and which way it points. Just the
@@ -86,12 +102,6 @@ pub struct PeerState {
     /// What their model is currently shown holding. Kept so a pose that says the same
     /// thing again — sixty a second of them — costs nothing.
     held: Option<Item>,
-    /// What this player is still allowed to change.
-    budget: Budget,
-    /// How far this player may still claim to have moved. A pose is a claim, and every
-    /// rule about *where* a peer may edit is checked against it, so a client that simply
-    /// says it is standing across the map would otherwise reach across the map.
-    travel: Budget,
 }
 
 /// Edits one peer may ask for per second, sustained.
@@ -575,8 +585,8 @@ fn draw_cars(
         .0
         .iter()
         .filter_map(|(id, p)| {
-            p.car
-                .map(|car| (*id, car_transform(car.pos.into(), car.yaw)))
+            let car = p.seen.as_ref()?.car?;
+            Some((*id, car_transform(car.pos.into(), car.yaw)))
         })
         .collect();
     if let Some(car) = me.0.ride.car() {
@@ -963,10 +973,16 @@ fn craft_on_request(
 }
 
 /// Where everybody is: this player, plus the last pose each peer sent. What the placement
-/// rules must not put a block inside of.
+/// rules must not put a block inside of. Somebody who has not posed yet is nowhere in
+/// particular, so there is nowhere to keep clear for them.
 fn standing(me: &Player, peers: &Peers) -> Vec<Vec3> {
     std::iter::once(me.pos)
-        .chain(peers.0.values().map(|p| p.pos))
+        .chain(
+            peers
+                .0
+                .values()
+                .filter_map(|p| p.seen.as_ref().map(|s| s.pos)),
+        )
         .collect()
 }
 
@@ -989,7 +1005,7 @@ fn authorized(role: Role, from: PlayerId, msg: &Msg) -> bool {
                     | Msg::WorldPart { .. }
                     | Msg::Edit { .. }
                     | Msg::Pose { .. }
-                    | Msg::PeerLeft { .. }
+                    | Msg::Present { .. }
                     | Msg::Inventory { .. } => true,
                     Msg::Hello | Msg::Craft { .. } => false,
                 }
@@ -997,7 +1013,7 @@ fn authorized(role: Role, from: PlayerId, msg: &Msg) -> bool {
         Role::Host => match msg {
             Msg::Welcome { .. }
             | Msg::WorldPart { .. }
-            | Msg::PeerLeft { .. }
+            | Msg::Present { .. }
             | Msg::Inventory { .. } => false,
             Msg::Pose { id, .. } => *id == from,
             Msg::Hello | Msg::Edit { .. } | Msg::Craft { .. } => true,
@@ -1056,6 +1072,16 @@ fn net_receive(
                             for edits in parts {
                                 session.send(Target::One(from), Msg::WorldPart { edits });
                             }
+                            // Who is here, after the world they are here in. The joiner
+                            // is still collecting that world in `net::boot` when its
+                            // arrival is announced to everybody else, so this is the copy
+                            // it is actually in a position to read.
+                            session.send(
+                                Target::One(from),
+                                Msg::Present {
+                                    ids: live(&peers, me),
+                                },
+                            );
                         }
                     }
                     // The handshake already collected the world in `net::boot`, so a part
@@ -1067,9 +1093,13 @@ fn net_receive(
                             // last said it was standing, and against what it is still
                             // allowed to ask for.
                             Role::Host => {
-                                // Nobody has said where they are yet, so nothing of theirs
-                                // can be checked. Their next pose is a frame away.
+                                // Somebody the host has never heard of, or who has not
+                                // said where they are yet: nothing of theirs can be
+                                // checked. Their next pose is a frame away.
                                 let Some(peer) = peers.0.get_mut(&from) else {
+                                    continue;
+                                };
+                                let Some(standing_at) = peer.seen.as_ref().map(|s| s.pos) else {
                                     continue;
                                 };
                                 // Asking faster than a person can play: the world is not
@@ -1082,7 +1112,7 @@ fn net_receive(
                                 Edit::Request {
                                     actor: Actor {
                                         id: from,
-                                        pos: peer.pos,
+                                        pos: standing_at,
                                     },
                                     pos,
                                     block,
@@ -1130,23 +1160,44 @@ fn net_receive(
                             session.send(Target::All, Msg::Pose { id, pose });
                         }
                         if id != me {
-                            track_peer(&mut commands, &mut peers, &palette, id, pose);
+                            peers.posed(&mut commands, &palette, id, pose);
                         }
                     }
-                    Msg::PeerLeft { id } => {
-                        welcomed.0.remove(&id);
-                        forget_peer(&mut commands, &mut peers, &mut inventories, id);
+                    Msg::Present { ids } => {
+                        peers.present(&mut commands, &mut inventories, me, &ids);
                     }
                     // The handshake already happened in `net::boot`, so a second Welcome
                     // has nothing left to do.
                     Msg::Welcome { .. } => {}
                 }
             }
+            // A link appearing or disappearing is the whole of who is in this world, and
+            // only the host has more than one of them. A peer's single link is the host it
+            // dialled, whose arrival it already knows about and whose departure ends the
+            // game.
+            Event::Joined(id) => {
+                if role.0 == Role::Host {
+                    present(
+                        &session,
+                        &mut commands,
+                        &mut peers,
+                        &mut inventories,
+                        me,
+                        Presence::Joined(id),
+                    );
+                }
+            }
             Event::Left(id) => match role.0 {
                 Role::Host => {
-                    session.send(Target::All, Msg::PeerLeft { id });
                     welcomed.0.remove(&id);
-                    forget_peer(&mut commands, &mut peers, &mut inventories, id);
+                    present(
+                        &session,
+                        &mut commands,
+                        &mut peers,
+                        &mut inventories,
+                        me,
+                        Presence::Left(id),
+                    );
                 }
                 // A peer only ever links to the host, but a departure that is not the
                 // host's must never end somebody's game.
@@ -1178,55 +1229,138 @@ fn vouched(pose: Pose, owner: &Inventory) -> Pose {
     }
 }
 
-/// Records where a player is and keeps their model there, spawning it the first time.
-///
-/// A pose is a *claim*, and on the host it is what every proximity rule is checked
-/// against, so a claim that outruns [`TRAVEL_RATE`] is refused: without that, a modified
-/// client says it is standing anywhere and edits anything, and no reach check means a
-/// thing. The first pose is where they say they spawned, which nothing can contradict.
-fn track_peer(
+/// What just happened to the host's set of links, which is the only thing that changes who
+/// is in the world.
+enum Presence {
+    Joined(PlayerId),
+    Left(PlayerId),
+}
+
+/// Everybody in this world as the host has it: the players it holds links to, and itself.
+fn live(peers: &Peers, me: PlayerId) -> Vec<PlayerId> {
+    peers.0.keys().copied().chain(std::iter::once(me)).collect()
+}
+
+/// A player arriving or leaving, told to everybody and applied here from the same list —
+/// so the host's own world is built by believing exactly what it says, as a peer's is.
+/// Host only: a peer has one link and nothing to declare about it.
+fn present(
+    session: &Session,
     commands: &mut Commands,
     peers: &mut Peers,
-    palette: &avatar::Palette,
-    id: PlayerId,
-    pose: Pose,
+    inventories: &mut Inventories,
+    me: PlayerId,
+    change: Presence,
 ) {
-    // A pose is the player's feet, which is also the model's origin — see `avatar`.
-    let pos = Vec3::from(pose.pos);
-    let transform = Transform {
-        translation: pos,
-        rotation: Quat::from_rotation_y(pose.yaw),
-        ..default()
-    };
-    match peers.0.get_mut(&id) {
-        Some(p) => {
-            if !p.travel.spend(p.pos.distance(pos)) {
-                return;
-            }
-            p.pos = pos;
-            p.car = pose.car;
-            commands.entity(p.body.root).insert(transform);
-            // Only when it changes: a pose arrives every frame, and re-stating the same
-            // cube would be sixty component writes a second per player to no effect.
-            if p.held != pose.held {
-                p.held = pose.held;
-                avatar::show_held(commands, palette, p.body, pose.held);
-            }
+    let mut ids = live(peers, me);
+    match change {
+        Presence::Joined(id) => ids.push(id),
+        Presence::Left(id) => ids.retain(|here| *here != id),
+    }
+    session.send(Target::All, Msg::Present { ids: ids.clone() });
+    peers.present(commands, inventories, me, &ids);
+}
+
+impl Peers {
+    /// The host's word on who is here, applied whole — the only way a player comes into
+    /// existence, and the only way one stops.
+    ///
+    /// Absolute, so it can be applied twice to the same answer and needs no order against
+    /// itself. That is what closes the ghost: presence rides the stream and poses ride
+    /// datagrams, with no order between the two, so a departure sent as a delta can be
+    /// overtaken by a pose relayed an instant earlier — and the avatar that pose put back
+    /// stands there for the rest of the session.
+    fn present(
+        &mut self,
+        commands: &mut Commands,
+        inventories: &mut Inventories,
+        me: PlayerId,
+        ids: &[PlayerId],
+    ) {
+        let here: HashSet<PlayerId> = ids.iter().copied().filter(|id| *id != me).collect();
+        for id in &here {
+            self.0.entry(*id).or_insert_with(PeerState::declared);
         }
-        None => {
-            let body = avatar::spawn(commands, palette, transform);
-            avatar::show_held(commands, palette, body, pose.held);
-            peers.0.insert(
-                id,
-                PeerState {
+        let gone: Vec<PlayerId> = self
+            .0
+            .keys()
+            .copied()
+            .filter(|id| !here.contains(id))
+            .collect();
+        for id in gone {
+            forget_peer(commands, self, inventories, id);
+        }
+    }
+
+    /// A pose *moves* a player the host has declared, and does nothing at all for anybody
+    /// else. Creating one here is what #6 was: the host relays a pose and announces a
+    /// departure on two transports with no order between them, so the loser of that race
+    /// would resurrect somebody who has left.
+    fn posed(
+        &mut self,
+        commands: &mut Commands,
+        palette: &avatar::Palette,
+        id: PlayerId,
+        pose: Pose,
+    ) {
+        if let Some(peer) = self.0.get_mut(&id) {
+            peer.moved(commands, palette, pose);
+        }
+    }
+}
+
+impl PeerState {
+    /// A player the host has said is here and who has not spoken yet.
+    fn declared() -> Self {
+        PeerState {
+            seen: None,
+            budget: Budget::new(EDIT_RATE, EDIT_BURST),
+            travel: Budget::new(TRAVEL_RATE, TRAVEL_BURST),
+        }
+    }
+
+    /// Records where this player is and keeps their model there, spawning it on their
+    /// first pose.
+    ///
+    /// A pose is a *claim*, and on the host it is what every proximity rule is checked
+    /// against, so a claim that outruns [`TRAVEL_RATE`] is refused: without that, a
+    /// modified client says it is standing anywhere and edits anything, and no reach check
+    /// means a thing. The first pose is where they say they spawned, which nothing can
+    /// contradict.
+    fn moved(&mut self, commands: &mut Commands, palette: &avatar::Palette, pose: Pose) {
+        // A pose is the player's feet, which is also the model's origin — see `avatar`.
+        let pos = Vec3::from(pose.pos);
+        let transform = Transform {
+            translation: pos,
+            rotation: Quat::from_rotation_y(pose.yaw),
+            ..default()
+        };
+        match &mut self.seen {
+            Some(seen) => {
+                if !self.travel.spend(seen.pos.distance(pos)) {
+                    return;
+                }
+                seen.pos = pos;
+                seen.car = pose.car;
+                commands.entity(seen.body.root).insert(transform);
+                // Only when it changes: a pose arrives every frame, and re-stating the
+                // same cube would be sixty component writes a second per player to no
+                // effect.
+                if seen.held != pose.held {
+                    seen.held = pose.held;
+                    avatar::show_held(commands, palette, seen.body, pose.held);
+                }
+            }
+            None => {
+                let body = avatar::spawn(commands, palette, transform);
+                avatar::show_held(commands, palette, body, pose.held);
+                self.seen = Some(Seen {
                     pos,
                     car: pose.car,
                     body,
                     held: pose.held,
-                    budget: Budget::new(EDIT_RATE, EDIT_BURST),
-                    travel: Budget::new(TRAVEL_RATE, TRAVEL_BURST),
-                },
-            );
+                });
+            }
         }
     }
 }
@@ -1244,8 +1378,8 @@ fn forget_peer(
     id: PlayerId,
 ) {
     inventories.0.remove(&id);
-    if let Some(p) = peers.0.remove(&id) {
-        commands.entity(p.body.root).despawn();
+    if let Some(seen) = peers.0.remove(&id).and_then(|p| p.seen) {
+        commands.entity(seen.body.root).despawn();
     }
 }
 
@@ -1441,6 +1575,10 @@ pub fn grab_mouse(cursor: &mut Query<&mut CursorOptions, With<PrimaryWindow>>, g
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
 
     #[test]
     fn an_edit_at_a_chunk_seam_dirties_the_neighbour() {
@@ -1460,8 +1598,6 @@ mod tests {
     /// `stream_chunks` will not rebuild one that already has an entity.
     #[test]
     fn an_unmeshable_dirty_chunk_waits_for_its_neighbour() {
-        use bevy::ecs::system::RunSystemOnce;
-
         let cp = ChunkPos::new(0, 0);
         let mut sim = World::new(5, []);
         for (dx, dz) in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)] {
@@ -1826,7 +1962,13 @@ mod tests {
         };
         assert!(authorized(Role::Host, peer, &pose(peer)));
         assert!(!authorized(Role::Host, peer, &pose(other)), "spoofed pose");
-        assert!(!authorized(Role::Host, peer, &Msg::PeerLeft { id: other }));
+        assert!(!authorized(
+            Role::Host,
+            peer,
+            &Msg::Present {
+                ids: vec![peer, other]
+            }
+        ));
         assert!(!authorized(
             Role::Host,
             peer,
@@ -2083,5 +2225,150 @@ mod tests {
             !authorized(Role::Peer { host }, host, &craft),
             "a host does not ask a peer to make things"
         );
+    }
+
+    /// Everything [`net_receive`] needs, around a real session. The shipped system runs
+    /// against it, so what the tests below exercise is the path the game takes rather
+    /// than a re-statement of it.
+    fn playing(boot: Boot) -> bevy::ecs::world::World {
+        let mut ecs = bevy::ecs::world::World::new();
+        ecs.insert_resource(avatar::Palette::new(
+            &mut Assets::<Mesh>::default(),
+            &mut Assets::<StandardMaterial>::default(),
+        ));
+        ecs.insert_resource(NetRole(boot.role));
+        ecs.insert_resource(Sim(World::new(boot.seed, boot.edits)));
+        ecs.insert_resource(Me(Player::spawn_at(Vec3::new(0.0, 80.0, 0.0))));
+        ecs.init_resource::<Chunks>();
+        ecs.init_resource::<Peers>();
+        ecs.init_resource::<Inventories>();
+        ecs.init_resource::<Welcomed>();
+        ecs.init_resource::<WorldBudget>();
+        ecs.init_resource::<Time>();
+        ecs.init_resource::<Messages<AppExit>>();
+        ecs.insert_non_send_resource(boot.session);
+        ecs
+    }
+
+    fn handle_the_network(ecs: &mut bevy::ecs::world::World) {
+        ecs.run_system_once(net_receive)
+            .expect("the network system");
+    }
+
+    fn who_is_here(ecs: &bevy::ecs::world::World) -> HashSet<PlayerId> {
+        ecs.resource::<Peers>().0.keys().copied().collect()
+    }
+
+    /// Runs `f` until it says yes, or gives up after `patience` with `whining`.
+    fn until(patience: Duration, whining: &str, mut f: impl FnMut() -> bool) -> Duration {
+        let started = std::time::Instant::now();
+        while !f() {
+            assert!(started.elapsed() < patience, "{whining}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        started.elapsed()
+    }
+
+    /// The ghost one hop out, which is what #6 was: on the host a message can no longer
+    /// follow its own departure, but the host announces on the stream and relays poses on
+    /// datagrams, and there is no order between those two. The peer that loses that race
+    /// used to re-spawn the avatar it had just despawned, and nothing ever removed it
+    /// again.
+    ///
+    /// Three real endpoints, because the player under test is the one with *no link* to
+    /// the player who left: A and B never meet, so nothing B can check tells it A is gone —
+    /// only the host's word does. Both peers run the shipped [`net_receive`], and the last
+    /// act is the negative control: the very pose that used to resurrect A, delivered
+    /// after the departure.
+    #[test]
+    fn a_departure_reaches_the_peer_that_never_had_a_link() {
+        const SEED: u64 = 909;
+        let host = crate::net::boot(None, SEED, "test-host").expect("hosting");
+        let host_id = host.session.me();
+        let addr = host.session.addr();
+
+        let serving = Arc::new(AtomicBool::new(true));
+        let stop = serving.clone();
+        let host_side = std::thread::spawn(move || {
+            // The world is built on this thread because the session is a non-send
+            // resource: bevy hands it out only to the thread that inserted it.
+            let mut ecs = playing(host);
+            while stop.load(Ordering::Relaxed) {
+                handle_the_network(&mut ecs);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            who_is_here(&ecs)
+        });
+
+        let mut a = playing(crate::net::boot(Some(addr.clone()), 0, "a").expect("a joins"));
+        let mut b = playing(crate::net::boot(Some(addr), 0, "b").expect("b joins"));
+        let a_id = a.non_send_resource::<Session>().me();
+        let b_id = b.non_send_resource::<Session>().me();
+        let standing_at = Pose {
+            pos: [4.0, 80.0, 4.0],
+            yaw: 0.0,
+            pitch: 0.0,
+            held: None,
+            car: None,
+        };
+
+        until(Duration::from_secs(20), "b never saw a arrive", || {
+            a.non_send_resource::<Session>().send(
+                Target::All,
+                Msg::Pose {
+                    id: a_id,
+                    pose: standing_at,
+                },
+            );
+            handle_the_network(&mut a);
+            handle_the_network(&mut b);
+            b.resource::<Peers>().0.get(&a_id).is_some_and(|p| {
+                // Not merely declared: a drawn avatar is what the ghost leaves behind.
+                p.seen.is_some()
+            })
+        });
+        assert_eq!(
+            who_is_here(&b),
+            HashSet::from([host_id, a_id]),
+            "b's world is the host and a"
+        );
+        let ghost = b.resource::<Peers>().0[&a_id]
+            .seen
+            .as_ref()
+            .expect("a is drawn")
+            .body
+            .root;
+
+        drop(a);
+        let took = until(Duration::from_secs(1), "a is still in b's world", || {
+            handle_the_network(&mut b);
+            !who_is_here(&b).contains(&a_id)
+        });
+        assert_eq!(
+            who_is_here(&b),
+            HashSet::from([host_id]),
+            "nobody but the host is left, {took:?} after a went"
+        );
+        assert!(b.get_entity(ghost).is_err(), "a's model is still standing");
+
+        // The negative control: the pose the host relayed a moment before the departure,
+        // arriving after it. This is the message that used to bring a back for good.
+        b.run_system_once(
+            move |mut peers: ResMut<Peers>,
+                  palette: Res<avatar::Palette>,
+                  mut commands: Commands| {
+                peers.posed(&mut commands, &palette, a_id, standing_at);
+            },
+        )
+        .expect("the late pose");
+        assert_eq!(
+            who_is_here(&b),
+            HashSet::from([host_id]),
+            "a pose brought a departed player back"
+        );
+
+        serving.store(false, Ordering::Relaxed);
+        let host_saw = host_side.join().expect("the host side");
+        assert_eq!(host_saw, HashSet::from([b_id]), "the host's own set");
     }
 }

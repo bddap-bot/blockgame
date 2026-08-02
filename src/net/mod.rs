@@ -31,8 +31,9 @@ pub use wire::{Msg, PlayerId, Pose};
 /// Bumped whenever the wire format changes incompatibly — mismatched builds then fail to
 /// connect instead of desyncing silently. `2` was inventories: [`Msg::Pose`] grew a held
 /// item, and crafting added two messages a build on `1` cannot decode. `3` is cars, which
-/// grew the pose again.
-pub const ALPN: &[u8] = b"bddap-bot/blockgame/3";
+/// grew the pose again. `4` is presence: a build on `3` announces departures the other
+/// side has no message for, and never says who is here at all.
+pub const ALPN: &[u8] = b"bddap-bot/blockgame/4";
 
 /// How long the whole join handshake may take: the host's answer *and* the world it then
 /// sends. Not per message — a clock the host restarts by sending something bounds nothing,
@@ -86,6 +87,9 @@ pub enum Role {
 #[derive(Debug)]
 pub enum Event {
     Message(PlayerId, Msg),
+    /// A player's first link arrived. On the host this means somebody joined; on a peer
+    /// it is the host, which it already knows it dialled.
+    Joined(PlayerId),
     /// A link went away. On the host this means a player left; on a peer it means the
     /// host is gone.
     Left(PlayerId),
@@ -108,11 +112,16 @@ pub struct Boot {
     pub beacon: Option<lan::Beacon>,
 }
 
-/// A live network session. Dropping it tears the endpoint down.
+/// How long leaving may take. [`Endpoint::close`] bounds itself at about three seconds on
+/// a bad path; this bounds the wait on the way out of the game, where the peer being said
+/// goodbye to may itself already be gone.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// A live network session. Dropping it says goodbye and tears the endpoint down.
 pub struct Session {
     /// The tokio runtime the connection tasks live on. Held so they keep running; the
     /// game never blocks on it — sends and receives are non-blocking channel ops.
-    _rt: tokio::runtime::Runtime,
+    rt: tokio::runtime::Runtime,
     router: Router,
     me: PlayerId,
     inbox: mpsc::UnboundedReceiver<Event>,
@@ -149,6 +158,23 @@ impl Session {
     /// (single player) every send is simply dropped by the dispatcher.
     pub fn send(&self, to: Target, msg: Msg) {
         let _ = self.outbox.send(Outbound { to, msg });
+    }
+}
+
+/// Quitting says so rather than going quiet.
+///
+/// Closing the endpoint is what makes the other end's reader exit, and that is the one
+/// place a departure is announced. Without it a player who quits is only noticed when
+/// their connection times out — half a minute of their avatar standing in everybody
+/// else's world, which is the ghost this protocol is built against, on a fuse.
+impl Drop for Session {
+    fn drop(&mut self) {
+        let router = &self.router;
+        // The timeout is built inside `block_on`: a timer has to be made from within the
+        // runtime it will run on.
+        let _ = self
+            .rt
+            .block_on(async { tokio::time::timeout(CLOSE_TIMEOUT, router.shutdown()).await });
     }
 }
 
@@ -216,11 +242,15 @@ impl<C> Default for Links<C> {
 }
 
 impl<C: Clone> Links<C> {
-    fn insert(&mut self, link: Link<C>) -> LinkId {
+    /// Adds a link and reports whether it was that player's first — the mirror of
+    /// [`Links::remove`]'s last, and for the same reason: a player arrives with their
+    /// first link and is gone with their last, whatever happens in between.
+    fn insert(&mut self, link: Link<C>) -> (LinkId, bool) {
+        let first = !self.by_id.values().any(|l| l.peer == link.peer);
         let id = self.next;
         self.next += 1;
         self.by_id.insert(id, link);
-        id
+        (id, first)
     }
 
     /// Who is speaking on this link, or `None` if it is already gone.
@@ -276,6 +306,23 @@ impl<C: Clone> Bus<C> {
             return false;
         };
         self.inbox.send(Event::Message(peer, msg)).is_ok()
+    }
+
+    /// Starts a link, announcing the arrival if it was that player's first.
+    ///
+    /// Holds the links lock across the send for the same reason [`Bus::deliver`] does, the
+    /// other way about: a message is delivered only while its link is live, so an arrival
+    /// sent under the lock lands strictly *before* anything that link ever says. The game
+    /// is what that buys — a pose can then only ever move a player it has already been
+    /// told about.
+    async fn begin_link(&self, link: Link<C>) -> LinkId {
+        let peer = link.peer;
+        let mut links = self.links.lock().await;
+        let (id, first) = links.insert(link);
+        if first {
+            let _ = self.inbox.send(Event::Joined(peer));
+        }
+        id
     }
 
     /// Ends a link, announcing the departure if it was that player's last.
@@ -374,7 +421,7 @@ pub fn boot(join: Option<EndpointAddr>, seed: u64, name: &str) -> Result<Boot> {
         edits,
         beacon,
         session: Session {
-            _rt: rt,
+            rt,
             router,
             me,
             inbox: inbox_rx,
@@ -535,11 +582,13 @@ async fn serve_link(conn: Connection, dialed: bool, bus: Arc<Bus>) -> Result<()>
         frames: frames_tx,
         queued: queued.clone(),
     };
-    let id = bus.links.lock().await.insert(Link {
-        peer,
-        conn: conn.clone(),
-        outbound,
-    });
+    let id = bus
+        .begin_link(Link {
+            peer,
+            conn: conn.clone(),
+            outbound,
+        })
+        .await;
 
     let writer = tokio::spawn(write_link(send, frames, queued, conn.clone()));
     let datagrams = tokio::spawn(read_datagrams(conn.clone(), id, peer, bus.clone()));
@@ -738,16 +787,16 @@ mod tests {
     }
 
     /// A link whose "connection" is just a tag, which is all the bookkeeping touches.
-    fn link(links: &mut Links<u8>, peer: PlayerId, conn: u8) -> LinkId {
+    fn link(peer: PlayerId, conn: u8) -> Link<u8> {
         let (frames, _writer) = mpsc::unbounded_channel();
-        links.insert(Link {
+        Link {
             peer,
             conn,
             outbound: Outbox {
                 frames,
                 queued: Arc::new(AtomicUsize::new(0)),
             },
-        })
+        }
     }
 
     /// A peer that stops reading must cost the host a bounded amount of memory and then
@@ -775,8 +824,10 @@ mod tests {
     fn a_second_connection_does_not_evict_the_first() {
         let mut links = Links::<u8>::default();
         let peer = id(1);
-        let first = link(&mut links, peer, 1);
-        let second = link(&mut links, peer, 2);
+        let (first, arrived) = links.insert(link(peer, 1));
+        let (second, again) = links.insert(link(peer, 2));
+        assert!(arrived, "the first link is the player arriving");
+        assert!(!again, "a second link is not a second player");
         assert_ne!(first, second, "each connection gets its own key");
         assert_eq!(links.targets(Target::One(peer)).len(), 2);
 
@@ -820,7 +871,7 @@ mod tests {
     async fn a_message_cannot_follow_its_own_departure() {
         let (bus, mut inbox) = bus();
         let peer = id(1);
-        let link = link(&mut *bus.links.lock().await, peer, 1);
+        let link = bus.begin_link(link(peer, 1)).await;
 
         assert!(bus.deliver(link, Msg::Hello).await, "a live link");
         bus.end_link(link).await;
@@ -828,8 +879,33 @@ mod tests {
 
         let seen = drained(&mut inbox);
         assert!(
-            matches!(seen[..], [Event::Message(..), Event::Left(_)]),
+            matches!(
+                seen[..],
+                [Event::Joined(_), Event::Message(..), Event::Left(_)]
+            ),
             "{seen:?}"
+        );
+    }
+
+    /// The other end of the same guarantee, and what lets a pose only ever *move* somebody:
+    /// nothing a player says can arrive before the game has been told they are here.
+    #[tokio::test]
+    async fn nobody_speaks_before_they_have_arrived() {
+        let (bus, mut inbox) = bus();
+        let peer = id(1);
+        let first = bus.begin_link(link(peer, 1)).await;
+        let second = bus.begin_link(link(peer, 2)).await;
+
+        assert!(bus.deliver(first, Msg::Hello).await);
+        assert!(bus.deliver(second, Msg::Hello).await);
+
+        let seen = drained(&mut inbox);
+        assert!(
+            matches!(
+                seen[..],
+                [Event::Joined(_), Event::Message(..), Event::Message(..)]
+            ),
+            "a second link is a second arrival: {seen:?}"
         );
     }
 
@@ -839,10 +915,8 @@ mod tests {
     async fn one_link_ending_does_not_silence_the_other() {
         let (bus, mut inbox) = bus();
         let peer = id(1);
-        let (first, second) = {
-            let mut links = bus.links.lock().await;
-            (link(&mut links, peer, 1), link(&mut links, peer, 2))
-        };
+        let first = bus.begin_link(link(peer, 1)).await;
+        let second = bus.begin_link(link(peer, 2)).await;
 
         bus.end_link(first).await;
         assert!(!bus.deliver(first, Msg::Hello).await, "the dead one");
@@ -851,7 +925,10 @@ mod tests {
 
         let seen = drained(&mut inbox);
         assert!(
-            matches!(seen[..], [Event::Message(..), Event::Left(_)]),
+            matches!(
+                seen[..],
+                [Event::Joined(_), Event::Message(..), Event::Left(_)]
+            ),
             "{seen:?}"
         );
     }
@@ -860,8 +937,8 @@ mod tests {
     fn a_send_to_one_player_reaches_only_their_links() {
         let mut links = Links::<u8>::default();
         let (a, b) = (id(1), id(2));
-        link(&mut links, a, 1);
-        link(&mut links, b, 2);
+        links.insert(link(a, 1));
+        links.insert(link(b, 2));
         let only_b: Vec<u8> = links
             .targets(Target::One(b))
             .into_iter()

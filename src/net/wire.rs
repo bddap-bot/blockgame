@@ -71,8 +71,15 @@ pub enum Msg {
     /// to everybody, so peers see each other without a second message type. A receiver
     /// ignores its own id.
     Pose { id: PlayerId, pose: Pose },
-    /// Host → peer: somebody disconnected, drop their avatar.
-    PeerLeft { id: PlayerId },
+    /// Host → peer: everybody who is in this world, the host included.
+    ///
+    /// The whole set rather than a join or a leave, because the pose stream beside it is
+    /// unordered against this one and unreliable: a departure sent as a delta can be
+    /// overtaken by a pose the host relayed an instant earlier, and the avatar that pose
+    /// puts back is never removed again. A set can only ever be applied to the same
+    /// answer, however it races with the poses — and it is also what a joiner needs, so
+    /// there is one message for "who is here" rather than one per change plus a roster.
+    Present { ids: Vec<PlayerId> },
     /// Peer → host: "make me one of these". The host owns every inventory, so a craft is
     /// asked for exactly as an edit is, and answered with an [`Msg::Inventory`].
     Craft { item: Item },
@@ -204,7 +211,7 @@ mod tests {
                 block: Block::Air,
             },
             Msg::Pose { id, pose: pose() },
-            Msg::PeerLeft { id },
+            Msg::Present { ids: vec![id] },
             Msg::Craft { item: Item::Car },
             Msg::Inventory {
                 items: vec![(Item::Nail, 8), (Item::Wood, 6)],
@@ -217,7 +224,7 @@ mod tests {
                 | Msg::WorldPart { .. }
                 | Msg::Edit { .. }
                 | Msg::Pose { .. }
-                | Msg::PeerLeft { .. }
+                | Msg::Present { .. }
                 | Msg::Craft { .. }
                 | Msg::Inventory { .. } => {}
             }
@@ -306,6 +313,18 @@ mod tests {
             n / BLOCKS_PER_CHUNK <= EDIT_LEN,
             "an edit costs more than EDIT_LEN says"
         );
+    }
+
+    /// The other message that grows with the world: one id per player, and a host holds
+    /// at most [`crate::net::MAX_INBOUND_LINKS`] links plus itself. A full house has to fit a
+    /// frame — a set that cannot be sent is a world nobody can be told who is in.
+    #[test]
+    fn a_full_house_of_players_fits_a_frame() {
+        let ids: Vec<PlayerId> = (0..=crate::net::MAX_INBOUND_LINKS as u8)
+            .map(|n| iroh::SecretKey::from_bytes(&[n; 32]).public())
+            .collect();
+        let n = encode(&Msg::Present { ids }).unwrap().len();
+        assert!(n <= MAX_FRAME_LEN, "a full house encodes to {n} bytes");
     }
 
     #[test]
