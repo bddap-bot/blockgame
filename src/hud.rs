@@ -180,7 +180,22 @@ pub fn update_status(
     };
     // ASCII only: bevy's built-in font has no glyph for a middle dot, and a missing glyph
     // draws as a tofu box.
-    text.0 = format!("{mode}  |  {} player(s)\n{who}", peers.0.len() + 1);
+    write(
+        &mut text,
+        format!("{mode}  |  {} player(s)\n{who}", peers.0.len() + 1),
+    );
+}
+
+/// Sets a label, and only when it actually reads differently.
+///
+/// Assigning through the `Mut` marks the text changed whatever it says, and changed text
+/// is re-shaped and re-laid-out. None of these lines change on most frames, so writing
+/// them unconditionally is a text layout of the whole HUD, sixty times a second, to
+/// produce the same pixels.
+fn write(text: &mut Mut<Text>, line: String) {
+    if text.0 != line {
+        text.0 = line;
+    }
 }
 
 #[allow(clippy::type_complexity)]
@@ -207,7 +222,7 @@ pub fn update_hotbar(
         let dim = if n > 0 { 1.0 } else { 0.28 };
         *background = BackgroundColor(Color::linear_rgb(r * dim, g * dim, b * dim));
         *color = TextColor(readable_on(r * dim, g * dim, b * dim));
-        text.0 = format!("{}\n{n}", cell.0.name());
+        write(&mut text, format!("{}\n{n}", cell.0.name()));
     }
 
     for (cell, mut background) in &mut rings {
@@ -252,7 +267,7 @@ pub fn update_hotbar(
                 )
             }
         };
-        text.0 = line;
+        write(&mut text, line);
         *color = TextColor(tint);
     }
 }

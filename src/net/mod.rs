@@ -26,8 +26,9 @@ use crate::world::BlockPos;
 pub use wire::{Msg, PlayerId, Pose};
 
 /// Bumped whenever the wire format changes incompatibly — mismatched builds then fail to
-/// connect instead of desyncing silently.
-pub const ALPN: &[u8] = b"bddap-bot/blockgame/1";
+/// connect instead of desyncing silently. `2` is inventories: [`Msg::Pose`] grew a held
+/// item, and crafting added two messages a build on `1` cannot decode.
+pub const ALPN: &[u8] = b"bddap-bot/blockgame/2";
 
 /// How long a joining peer waits for the host's `Welcome` before giving up.
 const JOIN_TIMEOUT: Duration = Duration::from_secs(20);
