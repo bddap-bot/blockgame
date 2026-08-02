@@ -37,7 +37,8 @@ struct BlockDef {
     name: &'static str,
     /// Linear RGB, baked into mesh vertex colours — the whole world uses one material.
     color: [f32; 3],
-    /// Solid voxels stop the player, occlude neighbouring faces, and can be targeted.
+    /// Solid voxels stop the player and can be targeted. Whether a voxel is *drawn* is a
+    /// separate question — see [`Block::visible`].
     solid: bool,
 }
 
@@ -117,6 +118,16 @@ impl Block {
 
     pub fn solid(self) -> bool {
         self.def().solid
+    }
+
+    /// Does this voxel draw? The mesher's only notion of presence — it emits faces for a
+    /// visible voxel and hides the faces a visible voxel is pressed against.
+    ///
+    /// Deliberately *not* [`Block::solid`], which is physics: the first walk-through block
+    /// that still has to be seen (the Cushion on the requirement sheets) would otherwise
+    /// draw a full six-face cube and occlude nothing.
+    pub fn visible(self) -> bool {
+        self != Block::Air
     }
 
     /// Can a player put this voxel in the world at all? The host's edit rules ask this

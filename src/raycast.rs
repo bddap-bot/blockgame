@@ -26,6 +26,12 @@ impl RayHit {
 /// Walks `dir` from `origin` for at most `max_dist` blocks, returning the first solid
 /// block hit. `dir` need not be normalized; `max_dist` is measured in world units.
 pub fn cast(world: &World, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<RayHit> {
+    // A NaN loses every comparison in the march (`NaN > x` is false), so the traversal
+    // would never end and the game thread would never come back. `dir` needs no such guard
+    // — `normalize_or_zero` already turns a non-finite direction into the zero below.
+    if !origin.is_finite() || !max_dist.is_finite() {
+        return None;
+    }
     let dir = dir.normalize_or_zero();
     if dir == Vec3::ZERO {
         return None;
@@ -42,24 +48,10 @@ pub fn cast(world: &World, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<Ray
         dir.y.signum() as i32,
         dir.z.signum() as i32,
     );
-    // Distance along the ray between successive crossings of each axis' grid planes.
-    let delta = Vec3::new(
-        if dir.x == 0.0 {
-            f32::INFINITY
-        } else {
-            (1.0 / dir.x).abs()
-        },
-        if dir.y == 0.0 {
-            f32::INFINITY
-        } else {
-            (1.0 / dir.y).abs()
-        },
-        if dir.z == 0.0 {
-            f32::INFINITY
-        } else {
-            (1.0 / dir.z).abs()
-        },
-    );
+    // Distance along the ray between successive crossings of each axis' grid planes. An
+    // axis the ray does not move along divides by zero and gets infinity, which is exactly
+    // right: it is never the nearest crossing.
+    let delta = (Vec3::ONE / dir).abs();
     // Distance along the ray to the first crossing on each axis.
     let mut next = Vec3::new(
         axis_first_crossing(origin.x, dir.x, delta.x),
@@ -67,7 +59,12 @@ pub fn cast(world: &World, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<Ray
         axis_first_crossing(origin.z, dir.z, delta.z),
     );
 
-    loop {
+    // Travelling `max_dist` crosses at most `max_dist` planes per axis, plus the one that
+    // ends the voxel the ray starts in — so this bound is never reached in play, the
+    // `max_dist` checks below end the march first. It is here so that no arithmetic
+    // surprise can turn a ray into a hang.
+    let max_steps = (3.0 * max_dist).ceil() as usize + 3;
+    for _ in 0..max_steps {
         // Advance along whichever axis crosses a boundary soonest.
         let normal = if next.x <= next.y && next.x <= next.z {
             if next.x > max_dist {
@@ -99,6 +96,7 @@ pub fn cast(world: &World, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<Ray
             });
         }
     }
+    None
 }
 
 fn axis_first_crossing(origin: f32, dir: f32, delta: f32) -> f32 {
@@ -169,24 +167,40 @@ mod tests {
 
     /// A diagonal ray must still report the face it actually entered through, or placed
     /// blocks land inside walls.
+    ///
+    /// The origin is deliberately off the diagonal: travelling equally in x and z, the ray
+    /// crosses z = 8 half a block before x = 8, so it is already in the target's z column
+    /// and -X is the only right answer. From a symmetric origin the ray meets the corner
+    /// exactly and the face is decided by a tie-break, which tests nothing.
     #[test]
     fn diagonal_rays_report_the_entry_face() {
         let mut w = empty_world();
         w.set_block(BlockPos::new(8, 10, 8), Block::Stone);
         let hit = cast(
             &w,
-            Vec3::new(6.1, 10.5, 6.1),
+            Vec3::new(6.1, 10.5, 6.6),
             Vec3::new(1.0, 0.0, 1.0),
             20.0,
         )
         .unwrap();
         assert_eq!(hit.block, BlockPos::new(8, 10, 8));
-        assert!(
-            hit.normal == IVec3::new(-1, 0, 0) || hit.normal == IVec3::new(0, 0, -1),
-            "entry face was {:?}",
-            hit.normal
-        );
+        assert_eq!(hit.normal, IVec3::new(-1, 0, 0));
+        assert_eq!(hit.adjacent(), BlockPos::new(7, 10, 8));
         assert!(!w.solid(hit.adjacent()), "the place target must be empty");
+    }
+
+    /// A non-finite origin or reach loses every distance comparison in the march. Without
+    /// the guard this does not fail — it hangs, with the game thread inside it.
+    #[test]
+    fn non_finite_input_hits_nothing() {
+        let mut w = empty_world();
+        w.set_block(BlockPos::new(8, 10, 8), Block::Stone);
+        let from = Vec3::new(4.5, 10.5, 8.5);
+        assert!(cast(&w, Vec3::new(f32::NAN, 10.5, 8.5), Vec3::X, 20.0).is_none());
+        assert!(cast(&w, Vec3::new(4.5, f32::INFINITY, 8.5), Vec3::X, 20.0).is_none());
+        assert!(cast(&w, from, Vec3::X, f32::NAN).is_none());
+        assert!(cast(&w, from, Vec3::X, f32::INFINITY).is_none());
+        assert!(cast(&w, from, Vec3::X, 20.0).is_some(), "still casts");
     }
 
     #[test]
