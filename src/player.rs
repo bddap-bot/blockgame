@@ -1120,6 +1120,12 @@ mod tests {
         let w = World::new(1, []);
         let start = Vec3::new(8.5, 50.0, 8.5);
         let mut p = walker(start);
+        // Already falling fast when the terrain runs out — a peer who joined mid-drop, and
+        // the only version of this that could cost anything if it were read as a landing.
+        if let Motion::Walking { velocity, .. } = &mut p.motion {
+            velocity.y = -WORST_LANDING_SPEED;
+        }
+
         frames(&w, &mut p, &Intent::default(), Fall::UNAIDED, 300);
         assert_eq!(p.condition, Condition::WHOLE, "hurt by nothing at all");
         assert_eq!(p.pos, start, "and neither fell nor teleported");
@@ -1130,8 +1136,18 @@ mod tests {
     #[test]
     fn a_block_built_into_you_mid_fall_does_not_hurt_you() {
         let mut w = floor_world();
-        let mut p = walker(Vec3::new(8.5, 20.0, 8.5));
-        frames(&w, &mut p, &Intent::default(), Fall::UNAIDED, 30);
+        let mut p = walker(Vec3::new(8.5, 60.0, 8.5));
+        // Long enough to be falling faster than a landing may be for free, so a push-out
+        // mistaken for a landing would really cost hearts.
+        frames(&w, &mut p, &Intent::default(), Fall::UNAIDED, 90);
+        let Motion::Walking { velocity, .. } = p.motion else {
+            panic!("walking");
+        };
+        assert!(
+            -velocity.y > SAFE_LANDING_SPEED,
+            "falling at {}",
+            velocity.y
+        );
 
         w.set_block(BlockPos::containing(p.pos), Block::Stone);
         assert_eq!(
