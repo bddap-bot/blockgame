@@ -23,7 +23,7 @@ use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
 
 use crate::registry::Block;
-use crate::world::BlockPos;
+use crate::world::{BLOCKS_PER_CHUNK, BlockPos};
 pub use wire::{Msg, PlayerId, Pose};
 
 /// Bumped whenever the wire format changes incompatibly — mismatched builds then fail to
@@ -32,8 +32,17 @@ pub use wire::{Msg, PlayerId, Pose};
 /// grew the pose again.
 pub const ALPN: &[u8] = b"bddap-bot/blockgame/3";
 
-/// How long a joining peer waits for the host's `Welcome` before giving up.
+/// How long the whole join handshake may take. Not per message: a clock the host restarts
+/// by sending something bounds nothing, and every part it sends is memory the joiner keeps.
 const JOIN_TIMEOUT: Duration = Duration::from_secs(20);
+/// The most world a joining peer will take in before it decides the host is lying.
+///
+/// `Welcome`'s `parts` is the host's *claim*, and nothing on the wire relates it to
+/// anything the joiner can check — so a host that keeps sending parts grows the joiner's
+/// buffer until it dies. Sixty-four megabytes of edits is orders of magnitude past any
+/// played-in world (a chunk holds at most [`BLOCKS_PER_CHUNK`] edits and play touches a
+/// handful of blocks per chunk), so this bounds the lie and never the game.
+const MAX_WORLD_EDITS: usize = 64 * 1024 * 1024 / size_of::<(BlockPos, Block)>();
 /// How long an accepted connection has to open its stream before its slot is taken back.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// A peer that can't absorb a reliable frame in this long is dropped. Each link has its
@@ -208,6 +217,10 @@ impl<C: Clone> Links<C> {
         id
     }
 
+    fn contains(&self, id: LinkId) -> bool {
+        self.by_id.contains_key(&id)
+    }
+
     /// Removes a link and reports whether that was the departing player's last one.
     fn remove(&mut self, id: LinkId) -> Option<(PlayerId, bool)> {
         let link = self.by_id.remove(&id)?;
@@ -229,12 +242,38 @@ impl<C: Clone> Links<C> {
     }
 }
 
-struct Bus {
-    links: Mutex<Links>,
+/// Generic in the connection for the same reason [`Links`] is: the ordering below is the
+/// part worth testing, and it needs no network. `C` is always [`Connection`] in the game.
+struct Bus<C = Connection> {
+    links: Mutex<Links<C>>,
     /// Inbound connections currently being served, counted separately from `links`
     /// because the limit has to bite before a connection is far enough along to be one.
     inbound: AtomicUsize,
     inbox: mpsc::UnboundedSender<Event>,
+}
+
+impl<C: Clone> Bus<C> {
+    /// Hands the game a message, and reports whether this link should keep reading.
+    ///
+    /// The liveness check is what makes a departure final. Both this and [`Bus::end_link`]
+    /// hold the links lock across their send, so a message either goes out while its link
+    /// is live — strictly before that link's `Left` — or not at all. Without it, a datagram
+    /// decoded in the moment a link died lands *after* the departure, the game spawns the
+    /// player it has just forgotten, and nothing ever removes it again.
+    async fn deliver(&self, link: LinkId, peer: PlayerId, msg: Msg) -> bool {
+        let links = self.links.lock().await;
+        links.contains(link) && self.inbox.send(Event::Message(peer, msg)).is_ok()
+    }
+
+    /// Ends a link, announcing the departure if it was that player's last.
+    async fn end_link(&self, link: LinkId) {
+        let mut links = self.links.lock().await;
+        if let Some((peer, last)) = links.remove(link)
+            && last
+        {
+            let _ = self.inbox.send(Event::Left(peer));
+        }
+    }
 }
 
 /// Starts the network. `join` is `None` to host, or where to find a host to join —
@@ -334,19 +373,20 @@ pub fn boot(join: Option<EndpointAddr>, seed: u64, name: &str) -> Result<Boot> {
 /// Collects the world: a `Welcome` saying how many parts to expect, then that many
 /// `WorldPart`s.
 ///
-/// [`JOIN_TIMEOUT`] bounds the wait for each message rather than the transfer as a whole —
-/// a big world is many frames, and a host that is still feeding them is not a host that
-/// has failed to answer.
+/// Everything the host says here is a claim, so the cost of believing it is bounded three
+/// ways: one deadline for the whole handshake, one chunk's worth of edits per part, and
+/// [`MAX_WORLD_EDITS`] over all of them.
 async fn await_welcome(
     inbox: &mut mpsc::UnboundedReceiver<Event>,
     host: PlayerId,
 ) -> Result<(u64, Vec<(BlockPos, Block)>)> {
+    let deadline = tokio::time::Instant::now() + JOIN_TIMEOUT;
     let mut world: Option<(u64, u32)> = None;
     let mut edits = Vec::new();
     loop {
-        let next = tokio::time::timeout(JOIN_TIMEOUT, inbox.recv())
+        let next = tokio::time::timeout_at(deadline, inbox.recv())
             .await
-            .map_err(|_| anyhow!("host went quiet for {JOIN_TIMEOUT:?} during the handshake"))?;
+            .map_err(|_| anyhow!("the handshake did not finish within {JOIN_TIMEOUT:?}"))?;
         // Only the endpoint we dialled gets to say what world this is. Anyone else's
         // `Welcome` would hand a stranger the seed and every block of the world.
         let msg = match next {
@@ -375,7 +415,18 @@ async fn await_welcome(
                 *remaining = remaining
                     .checked_sub(1)
                     .ok_or_else(|| anyhow!("host sent more world than it promised"))?;
+                // A part is one chunk, and a chunk holds one edit per block. A fatter part
+                // is a host lying about what a chunk is, and the frame limit alone would
+                // let it send four times a chunk's worth.
+                if part.len() > BLOCKS_PER_CHUNK {
+                    anyhow::bail!("a world part holds {} edits, past a chunk", part.len());
+                }
                 edits.extend(part);
+                // `parts` is a u32 with nothing behind it, so the promise bounds this only
+                // once it has been kept. This is what bounds it while it is being made.
+                if edits.len() > MAX_WORLD_EDITS {
+                    anyhow::bail!("host is sending more world than {MAX_WORLD_EDITS} edits");
+                }
             }
             _ => continue,
         }
@@ -390,7 +441,7 @@ struct Proto {
     bus: Arc<Bus>,
 }
 
-impl std::fmt::Debug for Bus {
+impl<C> std::fmt::Debug for Bus<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("Bus")
     }
@@ -470,16 +521,12 @@ async fn serve_link(conn: Connection, dialed: bool, bus: Arc<Bus>) -> Result<()>
     });
 
     let writer = tokio::spawn(write_link(send, frames, queued, conn.clone()));
-    let datagrams = tokio::spawn(read_datagrams(conn.clone(), peer, bus.clone()));
-    let result = read_stream(recv, peer, bus.clone()).await;
+    let datagrams = tokio::spawn(read_datagrams(conn.clone(), id, peer, bus.clone()));
+    let result = read_stream(recv, id, peer, bus.clone()).await;
 
     datagrams.abort();
     writer.abort();
-    if let Some((peer, last)) = bus.links.lock().await.remove(id)
-        && last
-    {
-        let _ = bus.inbox.send(Event::Left(peer));
-    }
+    bus.end_link(id).await;
     // The datagram task held a Connection clone, so an explicit close is what actually
     // ends the link rather than waiting out the idle timeout.
     conn.close(0u32.into(), b"link closed");
@@ -511,6 +558,7 @@ async fn write_link(
 
 async fn read_stream(
     mut recv: iroh::endpoint::RecvStream,
+    id: LinkId,
     peer: PlayerId,
     bus: Arc<Bus>,
 ) -> Result<()> {
@@ -532,17 +580,17 @@ async fn read_stream(
             buf.extend_from_slice(&chunk[..want]);
         }
         let msg = wire::decode(&buf).context("undecodable message")?;
-        if bus.inbox.send(Event::Message(peer, msg)).is_err() {
-            return Ok(()); // game is gone
+        if !bus.deliver(id, peer, msg).await {
+            return Ok(()); // the game is gone, or this link already is
         }
     }
 }
 
-async fn read_datagrams(conn: Connection, peer: PlayerId, bus: Arc<Bus>) {
+async fn read_datagrams(conn: Connection, id: LinkId, peer: PlayerId, bus: Arc<Bus>) {
     while let Ok(bytes) = conn.read_datagram().await {
         match wire::decode(&bytes) {
             Ok(msg) => {
-                if bus.inbox.send(Event::Message(peer, msg)).is_err() {
+                if !bus.deliver(id, peer, msg).await {
                     return;
                 }
             }
@@ -724,6 +772,72 @@ mod tests {
         assert!(links.remove(second).is_none(), "a link leaves only once");
     }
 
+    /// A bus with no network under it: everything the ordering tests touch is bookkeeping.
+    fn bus() -> (Arc<Bus<u8>>, mpsc::UnboundedReceiver<Event>) {
+        let (inbox, rx) = mpsc::unbounded_channel();
+        let bus = Bus {
+            links: Mutex::new(Links::default()),
+            inbound: AtomicUsize::new(0),
+            inbox,
+        };
+        (Arc::new(bus), rx)
+    }
+
+    fn drained(inbox: &mut mpsc::UnboundedReceiver<Event>) -> Vec<Event> {
+        let mut seen = Vec::new();
+        while let Ok(ev) = inbox.try_recv() {
+            seen.push(ev);
+        }
+        seen
+    }
+
+    /// The ghost. A datagram decoded in the moment its link died, delivered after the
+    /// departure, spawns the player the game has just forgotten — and nothing ever removes
+    /// that avatar again: it stands there for the rest of the session, inflating the player
+    /// count and, on the host, holding a spot where no block may be placed.
+    #[tokio::test]
+    async fn a_message_cannot_follow_its_own_departure() {
+        let (bus, mut inbox) = bus();
+        let peer = id(1);
+        let link = link(&mut *bus.links.lock().await, peer, 1);
+
+        assert!(bus.deliver(link, peer, Msg::Hello).await, "a live link");
+        bus.end_link(link).await;
+        assert!(
+            !bus.deliver(link, peer, Msg::Hello).await,
+            "a dead link spoke"
+        );
+
+        let seen = drained(&mut inbox);
+        assert!(
+            matches!(seen[..], [Event::Message(..), Event::Left(_)]),
+            "{seen:?}"
+        );
+    }
+
+    /// A player is gone when their *last* link is, so a message on the surviving one still
+    /// belongs to somebody who is here.
+    #[tokio::test]
+    async fn one_link_ending_does_not_silence_the_other() {
+        let (bus, mut inbox) = bus();
+        let peer = id(1);
+        let (first, second) = {
+            let mut links = bus.links.lock().await;
+            (link(&mut links, peer, 1), link(&mut links, peer, 2))
+        };
+
+        bus.end_link(first).await;
+        assert!(!bus.deliver(first, peer, Msg::Hello).await, "the dead one");
+        assert!(bus.deliver(second, peer, Msg::Hello).await, "the live one");
+        bus.end_link(second).await;
+
+        let seen = drained(&mut inbox);
+        assert!(
+            matches!(seen[..], [Event::Message(..), Event::Left(_)]),
+            "{seen:?}"
+        );
+    }
+
     #[test]
     fn a_send_to_one_player_reaches_only_their_links() {
         let mut links = Links::<u8>::default();
@@ -737,5 +851,100 @@ mod tests {
             .collect();
         assert_eq!(only_b, vec![2]);
         assert_eq!(links.targets(Target::All).len(), 2);
+    }
+
+    /// One chunk's worth of edits: the biggest honest part there is.
+    fn a_full_chunk() -> Vec<(BlockPos, Block)> {
+        (0..BLOCKS_PER_CHUNK)
+            .map(|i| (BlockPos::new(i as i32, 0, 0), Block::Stone))
+            .collect()
+    }
+
+    fn say(tx: &mpsc::UnboundedSender<Event>, host: PlayerId, msg: Msg) {
+        tx.send(Event::Message(host, msg))
+            .expect("the joiner is up");
+    }
+
+    /// The joiner's buffer is memory a host grows from the other side of the world, and
+    /// `parts` is a `u32` it promises rather than anything the joiner can check. So it stops
+    /// believing the promise long before keeping it costs the game.
+    #[tokio::test]
+    async fn a_joiner_stops_taking_more_world_than_it_will_hold() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let host = id(9);
+        let chunk = a_full_chunk();
+        say(
+            &tx,
+            host,
+            Msg::Welcome {
+                seed: 1,
+                parts: u32::MAX,
+            },
+        );
+        for _ in 0..MAX_WORLD_EDITS.div_ceil(BLOCKS_PER_CHUNK) + 1 {
+            say(
+                &tx,
+                host,
+                Msg::WorldPart {
+                    edits: chunk.clone(),
+                },
+            );
+        }
+        drop(tx);
+
+        let err = await_welcome(&mut rx, host)
+            .await
+            .expect_err("swallowed it");
+        assert!(
+            format!("{err:#}").contains("is sending more world"),
+            "gave up for the wrong reason: {err:#}"
+        );
+    }
+
+    /// A part is one chunk, and a chunk holds one edit per block. The frame limit alone
+    /// would let a host put four chunks' worth in each part it promised.
+    #[tokio::test]
+    async fn a_world_part_may_not_outgrow_a_chunk() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let host = id(9);
+        let mut fat = a_full_chunk();
+        fat.push((BlockPos::new(0, 1, 0), Block::Stone));
+        say(&tx, host, Msg::Welcome { seed: 1, parts: 1 });
+        say(&tx, host, Msg::WorldPart { edits: fat });
+
+        let err = await_welcome(&mut rx, host)
+            .await
+            .expect_err("swallowed it");
+        assert!(format!("{err:#}").contains("past a chunk"), "{err:#}");
+    }
+
+    /// A clock the host restarts by sending something bounds nothing: a host dribbling one
+    /// part just inside every timeout would hold a joiner on the loading screen forever.
+    #[tokio::test(start_paused = true)]
+    async fn a_dribbling_host_cannot_restart_the_join_clock() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let host = id(9);
+        tokio::spawn(async move {
+            // Not `say`: the joiner is expected to give up first, and the sends after that
+            // are the point — a host still talking to somebody who has stopped listening.
+            let speak = |msg| {
+                let _ = tx.send(Event::Message(host, msg));
+            };
+            speak(Msg::Welcome { seed: 1, parts: 3 });
+            for _ in 0..3 {
+                tokio::time::sleep(JOIN_TIMEOUT * 3 / 4).await;
+                speak(Msg::WorldPart { edits: Vec::new() });
+            }
+        });
+
+        let started = tokio::time::Instant::now();
+        await_welcome(&mut rx, host)
+            .await
+            .expect_err("waited it out");
+        assert!(
+            started.elapsed() <= JOIN_TIMEOUT,
+            "the clock restarted: {:?}",
+            started.elapsed()
+        );
     }
 }
