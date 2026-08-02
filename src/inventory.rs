@@ -13,7 +13,7 @@ use bevy::prelude::Resource;
 use std::collections::HashMap;
 
 use crate::net::PlayerId;
-use crate::registry::Item;
+use crate::registry::{Item, Use};
 
 /// One player's things: a count per item, indexed by [`Item::index`].
 ///
@@ -75,6 +75,37 @@ impl Inventory {
         }
         self.add(item, 1);
         true
+    }
+
+    /// What is actually in this player's hand: the item they have selected, or nothing if
+    /// they have none of it.
+    ///
+    /// Selection is a cursor over the whole registry — pointing at a car is how you read
+    /// what a car costs — so pointing at one is not holding one. Everything that asks
+    /// "what are they holding" asks here: the model in their hand, and the behaviour of
+    /// the use button, must agree.
+    pub fn in_hand(&self, selected: Item) -> Option<Item> {
+        Some(selected).filter(|item| self.count(*item) > 0)
+    }
+
+    /// What the use button does for this player. A hand, unless they are holding a tool.
+    pub fn using(&self, selected: Item) -> Use {
+        self.in_hand(selected).map_or(Use::BARE_HAND, Item::using)
+    }
+
+    /// How far this player may reach, whatever they have selected: the furthest any tool
+    /// they own works.
+    ///
+    /// This is the host's rule, and it is deliberately answered from the pile rather than
+    /// from what somebody says is in their hand — the pile is the host's own record, and a
+    /// selection is a claim it has no way to check. The slack it buys a cheat is the range
+    /// of a gun they own and could simply have selected, which is no range at all.
+    pub fn reach(&self) -> f32 {
+        Item::ALL
+            .iter()
+            .filter(|item| self.count(**item) > 0)
+            .map(|item| item.using().reach)
+            .fold(Use::BARE_HAND.reach, f32::max)
     }
 
     /// Everything held, for the wire. Empty piles are left out: an inventory is mostly
@@ -212,6 +243,40 @@ mod tests {
         }
         assert!(inv.craft(Item::Car));
         assert_eq!(inv.count(Item::Car), 1);
+    }
+
+    /// Selecting a thing you have none of is how you read its recipe, so it must not also
+    /// hand you the thing: a rifle you have not built cannot be aimed with.
+    #[test]
+    fn pointing_at_a_rifle_is_not_holding_one() {
+        let mut inv = Inventory::default();
+        assert_eq!(inv.in_hand(Item::Rifle), None);
+        assert_eq!(inv.using(Item::Rifle), Use::BARE_HAND);
+
+        inv.add(Item::Rifle, 1);
+        assert_eq!(inv.in_hand(Item::Rifle), Some(Item::Rifle));
+        assert_eq!(inv.using(Item::Rifle), Item::Rifle.using());
+    }
+
+    /// The host's reach rule. It is answered from the pile because the pile is the one
+    /// thing about a peer the host actually knows — and it must not be answered by an
+    /// empty-handed player owning nothing.
+    #[test]
+    fn reach_is_the_best_thing_you_own() {
+        let mut inv = Inventory::default();
+        assert_eq!(inv.reach(), Use::BARE_HAND.reach, "an arm is the floor");
+
+        inv.add(Item::Hammer, 1);
+        assert_eq!(inv.reach(), Use::BARE_HAND.reach, "a hammer is swung");
+
+        inv.add(Item::Handgun, 1);
+        assert_eq!(inv.reach(), Item::Handgun.using().reach);
+
+        inv.add(Item::Rifle, 1);
+        assert_eq!(inv.reach(), Item::Rifle.using().reach, "the best you own");
+
+        assert!(inv.take(Item::Rifle, 1));
+        assert_eq!(inv.reach(), Item::Handgun.using().reach, "and it is gone");
     }
 
     /// The wire round trip. Absolute state, so what a peer decodes is exactly the pile the

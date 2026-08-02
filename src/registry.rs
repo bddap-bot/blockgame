@@ -125,18 +125,75 @@ impl Block {
     }
 }
 
+/// What holding the use button does — the behaviour dimension of the registry.
+///
+/// One row of numbers, not a family of kinds: every use is the same act — reach out along
+/// the aim and chew through the block there — and an item is only ever *further*,
+/// *faster*, or *closer up* than a bare hand. A hammer and a rifle differ in three floats,
+/// so the game loop has one path through them and no per-item branch anywhere.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Use {
+    /// How far along the aim it works, in blocks.
+    pub reach: f32,
+    /// Blocks broken per second of holding the button.
+    pub speed: f32,
+    /// How far the view narrows while the button is held. 1.0 is no scope at all.
+    pub zoom: f32,
+}
+
+impl Use {
+    /// A bare hand, and the baseline every tool is measured against.
+    ///
+    /// Anything that is not a tool uses this, so "what does the button do" always has an
+    /// answer: holding a nail is not a special case, it is just a hand with a nail in it.
+    pub const BARE_HAND: Use = Use {
+        reach: 6.0,
+        speed: 2.0,
+        zoom: 1.0,
+    };
+
+    /// How this reads on the HUD, or nothing for a bare hand — a player holding a nail is
+    /// told about the nail, not about their arm.
+    pub fn summary(self) -> Option<String> {
+        if self.reach > Use::BARE_HAND.reach {
+            let scope = if self.zoom > 1.0 { ", scoped" } else { "" };
+            Some(format!("shoots {:.0} blocks{scope}", self.reach))
+        } else if self.speed > Use::BARE_HAND.speed {
+            Some(format!(
+                "digs {}x",
+                round(self.speed / Use::BARE_HAND.speed)
+            ))
+        } else {
+            None
+        }
+    }
+}
+
+/// `2.5` as "2.5" and `4.0` as "4": a whole number of times faster is written as one.
+fn round(x: f32) -> String {
+    if (x - x.round()).abs() < 0.05 {
+        format!("{x:.0}")
+    } else {
+        format!("{x:.1}")
+    }
+}
+
 /// What an item *is*.
 ///
-/// [`Class::Block`] is the only one the game acts on today: it says which voxel the item
-/// puts in the world. The rest are the classes the requirement sheets ask for, and the
-/// whole of what distinguishes a rifle from a car until one of them does something — they
-/// carry a colour because that is all there is to draw of a thing with no behaviour yet.
+/// [`Class::Block`] says which voxel the item puts in the world; [`Class::Tool`] says what
+/// its use button does. The rest are the classes the requirement sheets ask for, and carry
+/// only a colour, because a colour is all there is to draw of a thing with no behaviour
+/// yet.
+///
+/// A [`Use`] lives on the tool arm rather than beside the class, so a component cannot be
+/// given a rifle's range by a mistyped table row: "a tool is the thing you use" is a fact
+/// about the shape of this enum.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Class {
     /// Goes in the world as this voxel, and is drawn in its colour.
     Block(Block),
     /// Swung or fired at the world. Linear RGB, as everywhere else in this file.
-    Tool { color: [f32; 3] },
+    Tool { color: [f32; 3], using: Use },
     /// Not used on its own — spent making something else.
     Component { color: [f32; 3] },
     /// Worn, and changes how its wearer moves.
@@ -273,31 +330,58 @@ impl Item {
                 },
                 recipe: &[(Item::Stone, 1)],
             },
+            // Swung, so it reaches no further than an arm — what a hammer buys is pace.
             Item::Hammer => ItemDef {
                 name: "hammer",
                 class: Tool {
                     color: [0.55, 0.35, 0.18],
+                    using: Use {
+                        speed: 5.0,
+                        ..Use::BARE_HAND
+                    },
                 },
                 recipe: &[(Item::Wood, 2), (Item::Nail, 1)],
             },
+            // The fastest thing in the game, and the last word in digging: a block a
+            // frame or two. Nothing digs faster, because nothing may outrun `EDIT_RATE`.
             Item::Drill => ItemDef {
                 name: "drill",
                 class: Tool {
                     color: [0.90, 0.45, 0.08],
+                    using: Use {
+                        speed: 8.0,
+                        ..Use::BARE_HAND
+                    },
                 },
                 recipe: &[(Item::Wood, 1), (Item::Stone, 2), (Item::Nail, 2)],
             },
+            // The guns break blocks at a distance — there is nothing else in the world to
+            // shoot at, and knocking the top off a hill from the next hill over is the
+            // whole game. Quicker than a hand, slower than the tools you have to walk to.
             Item::Handgun => ItemDef {
                 name: "handgun",
                 class: Tool {
                     color: [0.22, 0.22, 0.26],
+                    using: Use {
+                        reach: 24.0,
+                        speed: 4.0,
+                        ..Use::BARE_HAND
+                    },
                 },
                 recipe: &[(Item::Wood, 1), (Item::Nail, 2)],
             },
+            // Further than anything else, and the only thing that narrows the view: at 64
+            // blocks a target is a few pixels wide, so the scope is what makes the range
+            // usable rather than a number in a table.
             Item::Rifle => ItemDef {
                 name: "rifle",
                 class: Tool {
                     color: [0.30, 0.23, 0.16],
+                    using: Use {
+                        reach: 64.0,
+                        speed: 3.0,
+                        zoom: 3.0,
+                    },
                 },
                 recipe: &[(Item::Wood, 2), (Item::Nail, 3)],
             },
@@ -325,6 +409,15 @@ impl Item {
 
     pub fn class(self) -> Class {
         self.def().class
+    }
+
+    /// What the use button does while this is in hand. Everything that is not a tool is a
+    /// hand holding something, which is the only sense in which a nail has a behaviour.
+    pub fn using(self) -> Use {
+        match self.class() {
+            Class::Tool { using, .. } => using,
+            _ => Use::BARE_HAND,
+        }
     }
 
     /// What one of these costs to make, or empty for something you gather.
@@ -355,7 +448,7 @@ impl Item {
     pub fn color(self) -> [f32; 3] {
         match self.class() {
             Class::Block(b) => b.color(),
-            Class::Tool { color }
+            Class::Tool { color, .. }
             | Class::Component { color }
             | Class::Equippable { color }
             | Class::Vehicle { color } => color,
@@ -543,6 +636,75 @@ mod tests {
             assert!(!item.recipe().is_empty(), "{item:?} cannot be made");
         }
         assert_eq!(Item::Cushion.places(), Some(Block::Cushion), "placeable");
+    }
+
+    /// A tool is exactly the thing that does something, and the only thing that does. A
+    /// tool no better than a hand is a recipe a child pays for and gets nothing from; a
+    /// component that digs is a table row that wandered.
+    #[test]
+    fn only_tools_do_anything() {
+        for item in Item::ALL {
+            let is_tool = matches!(item.class(), Class::Tool { .. });
+            assert_eq!(
+                item.using() != Use::BARE_HAND,
+                is_tool,
+                "{item:?} is a {} that {}",
+                item.class().word(),
+                if is_tool { "does nothing" } else { "acts" }
+            );
+        }
+    }
+
+    /// The requirement sheet's tools, in one assertion: the hammer beats a hand, the drill
+    /// beats the hammer, both are swung at arm's length, and the guns are the ones that
+    /// work at a distance — the rifle furthest, and alone in having a scope.
+    #[test]
+    fn the_tools_behave_as_the_sheet_asks() {
+        let (hand, hammer, drill) = (Use::BARE_HAND, Item::Hammer.using(), Item::Drill.using());
+        assert!(hand.speed < hammer.speed && hammer.speed < drill.speed);
+        assert_eq!(
+            (hammer.reach, drill.reach),
+            (hand.reach, hand.reach),
+            "melee: a hammer buys pace, not range"
+        );
+
+        let (handgun, rifle) = (Item::Handgun.using(), Item::Rifle.using());
+        assert!(hand.reach < handgun.reach && handgun.reach < rifle.reach);
+        for item in Item::ALL {
+            assert_eq!(
+                item.using().zoom > 1.0,
+                *item == Item::Rifle,
+                "{item:?} and the scope"
+            );
+        }
+        assert!(
+            matches!(Item::Nail.class(), Class::Component { .. }),
+            "a nail is spent in recipes and never swung"
+        );
+    }
+
+    /// The scope has to survive the struct-update the tool rows are written with: a
+    /// `..BARE_HAND` under the wrong field is a rifle that reaches 64 blocks and shows you
+    /// none of it.
+    #[test]
+    fn the_scope_narrows_the_view() {
+        assert!(Item::Rifle.using().zoom > 2.0);
+        assert_eq!(Use::BARE_HAND.zoom, 1.0, "a hand does not zoom");
+    }
+
+    /// What the HUD says about each thing, which is the only place a player is told what
+    /// the button in their hand does.
+    #[test]
+    fn a_tool_says_what_it_does() {
+        assert_eq!(Item::Nail.using().summary(), None, "a nail is not a tool");
+        assert_eq!(Item::Grass.using().summary(), None);
+        assert_eq!(Item::Hammer.using().summary().unwrap(), "digs 2.5x");
+        assert_eq!(Item::Drill.using().summary().unwrap(), "digs 4x");
+        assert_eq!(Item::Handgun.using().summary().unwrap(), "shoots 24 blocks");
+        assert_eq!(
+            Item::Rifle.using().summary().unwrap(),
+            "shoots 64 blocks, scoped"
+        );
     }
 
     #[test]

@@ -236,10 +236,7 @@ pub fn update_hotbar(
     if let Ok((mut text, mut color)) = recipe.single_mut() {
         let item = held.0;
         let (line, tint) = if item.recipe().is_empty() {
-            (
-                format!("{} ({}) - dig it up", item.name(), item.class().word()),
-                Color::WHITE,
-            )
+            (format!("{} - dig it up", title(item)), Color::WHITE)
         } else {
             let cost: Vec<String> = item
                 .recipe()
@@ -249,26 +246,30 @@ pub fn update_hotbar(
             let cost = cost.join(" + ");
             if inventory.can_craft(item) {
                 (
-                    format!(
-                        "{} ({}) = {cost}   press X to make one",
-                        item.name(),
-                        item.class().word()
-                    ),
+                    format!("{} = {cost}   press X to make one", title(item)),
                     Color::srgb(0.55, 1.0, 0.55),
                 )
             } else {
                 (
-                    format!(
-                        "{} ({}) = {cost}   you need more",
-                        item.name(),
-                        item.class().word()
-                    ),
+                    format!("{} = {cost}   you need more", title(item)),
                     Color::srgb(0.85, 0.85, 0.85),
                 )
             }
         };
         write(&mut text, line);
         *color = TextColor(tint);
+    }
+}
+
+/// What a thing is and what it does: "rifle (tool, shoots 64 blocks, scoped)".
+///
+/// Both halves come out of the registry, so a new tool describes itself here — and what a
+/// player is told the trigger does is read from the same row the trigger obeys.
+fn title(item: Item) -> String {
+    let what = item.class().word();
+    match item.using().summary() {
+        Some(does) => format!("{} ({what}, {does})", item.name()),
+        None => format!("{} ({what})", item.name()),
     }
 }
 
@@ -308,6 +309,38 @@ mod tests {
         let per_cell = CELL.0 + 2.0 * RING + 4.0;
         let width = per_cell * HOTBAR_COLUMNS as f32;
         assert!(width <= 1280.0, "the hotbar is {width}px wide");
+    }
+
+    /// The longest thing the recipe line can ever say still fits the Deck's panel. It is
+    /// one line on a dark plate, and the character it loses off the right edge is the one
+    /// telling a child what the trigger in their hand does.
+    #[test]
+    fn the_recipe_line_fits_the_deck_panel() {
+        // 20px of bevy's default font advances well under 12px a character; 100 of them is
+        // 1200px at that pessimistic width, inside the 1280 panel.
+        const BUDGET: usize = 100;
+        for item in Item::ALL {
+            let cost: Vec<String> = item
+                .recipe()
+                .iter()
+                .map(|(g, n)| format!("{n} {}", g.name()))
+                .collect();
+            let line = format!(
+                "{} = {}   press X to make one",
+                title(*item),
+                cost.join(" + ")
+            );
+            assert!(line.len() <= BUDGET, "{} chars: {line}", line.len());
+        }
+    }
+
+    /// A tool's row in the registry is what the player is told about it, so the words and
+    /// the behaviour cannot drift.
+    #[test]
+    fn the_line_says_what_the_trigger_does() {
+        assert_eq!(title(Item::Rifle), "rifle (tool, shoots 64 blocks, scoped)");
+        assert_eq!(title(Item::Drill), "drill (tool, digs 4x)");
+        assert_eq!(title(Item::Nail), "nail (part)", "a nail does nothing");
     }
 
     /// Light cells get dark text, dark cells get light text. Sand is the case that bites:

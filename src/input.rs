@@ -30,7 +30,11 @@ pub struct KeyBinds {
     pub descend: KeyCode,
     pub toggle_fly: KeyCode,
     pub quit: KeyCode,
-    pub break_block: MouseButton,
+    /// Held down to swing, drill or fire — see [`crate::registry::Use`]. Held rather than
+    /// tapped because breaking a block takes time now, and how long it takes is the whole
+    /// difference between a fist and a drill.
+    pub use_item: MouseButton,
+    /// Tapped: a held place button sprays a wall of blocks nobody asked for.
     pub place_block: MouseButton,
     /// Makes one of whatever the hotbar cursor is on.
     pub craft: KeyCode,
@@ -53,7 +57,7 @@ pub const KEYS: KeyBinds = KeyBinds {
     descend: KeyCode::ControlLeft,
     toggle_fly: KeyCode::KeyF,
     quit: KeyCode::Escape,
-    break_block: MouseButton::Left,
+    use_item: MouseButton::Left,
     place_block: MouseButton::Right,
     craft: KeyCode::KeyC,
     prev_item: KeyCode::KeyQ,
@@ -80,9 +84,9 @@ pub struct PadBinds {
     /// X — makes one of whatever the hotbar cursor is on. The only face button no
     /// movement action uses, so crafting never fights with jumping.
     pub craft: GamepadButton,
-    /// R2
-    pub break_block: GamepadButton,
-    /// L2
+    /// R2 — the trigger, held: swing, drill or fire whatever is in hand.
+    pub use_item: GamepadButton,
+    /// L2 — the other trigger, tapped: put a block down.
     pub place_block: GamepadButton,
     /// R1 — hold to move faster
     pub sprint: GamepadButton,
@@ -105,7 +109,7 @@ pub const PAD: PadBinds = PadBinds {
     jump: GamepadButton::South,
     toggle_fly: GamepadButton::North,
     craft: GamepadButton::West,
-    break_block: GamepadButton::RightTrigger2,
+    use_item: GamepadButton::RightTrigger2,
     place_block: GamepadButton::LeftTrigger2,
     sprint: GamepadButton::RightTrigger,
     descend: GamepadButton::LeftTrigger,
@@ -128,7 +132,9 @@ pub struct Intent {
     /// While flying: `+1` up, `-1` down.
     pub vertical: f32,
     pub toggle_fly: bool,
-    pub break_block: bool,
+    /// Held, not tapped: this drives [`crate::registry::Use`], and a block takes time to
+    /// break.
+    pub use_item: bool,
     pub place_block: bool,
     /// Hotbar cursor movement, in cells. A row is [`HOTBAR_COLUMNS`] of them.
     pub item_delta: i32,
@@ -166,7 +172,7 @@ pub fn gather_intent(
     out.sprint = keys.pressed(KEYS.sprint);
     out.vertical = keys.pressed(KEYS.jump) as i32 as f32 - keys.pressed(KEYS.descend) as i32 as f32;
     out.toggle_fly = keys.just_pressed(KEYS.toggle_fly);
-    out.break_block = mouse.just_pressed(KEYS.break_block);
+    out.use_item = mouse.pressed(KEYS.use_item);
     out.place_block = mouse.just_pressed(KEYS.place_block);
     out.craft = keys.just_pressed(KEYS.craft);
     out.quit = keys.just_pressed(KEYS.quit);
@@ -193,7 +199,7 @@ pub fn gather_intent(
         out.vertical +=
             pad.pressed(PAD.jump) as i32 as f32 - pad.pressed(PAD.descend) as i32 as f32;
         out.toggle_fly |= pad.just_pressed(PAD.toggle_fly);
-        out.break_block |= pad.just_pressed(PAD.break_block);
+        out.use_item |= pad.pressed(PAD.use_item);
         out.place_block |= pad.just_pressed(PAD.place_block);
         out.craft |= pad.just_pressed(PAD.craft);
         out.item_delta +=

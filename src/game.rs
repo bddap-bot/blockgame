@@ -19,7 +19,7 @@ use crate::mesh::{ChunkMesh, build_chunk_mesh};
 use crate::net::{Boot, Event, Msg, PlayerId, Pose, Role, Session, Target};
 use crate::player::{self, Motion, Player};
 use crate::raycast;
-use crate::registry::{Block, Item};
+use crate::registry::{Block, Item, Use};
 use crate::world::{BlockPos, CHUNK_SIZE, ChunkPos, World};
 
 /// Chunks of terrain visible in every direction.
@@ -33,12 +33,13 @@ const MESH_BUDGET: usize = 3;
 /// neighbours loaded to cull its seams against.
 const UNLOAD_RADIUS: i32 = VIEW_RADIUS + 2;
 const _: () = assert!(UNLOAD_RADIUS > VIEW_RADIUS);
-/// How far the player can reach to break or place, in blocks.
-const REACH: f32 = 6.0;
-/// Slack the host allows on [`REACH`] when checking a peer's edit. The host checks
+/// Slack the host allows on a player's reach when checking their edit. The host checks
 /// against the pose that peer last sent, which is up to a round trip old; without the
 /// slack a peer editing while sprinting would have legitimate edits refused.
 const REACH_LAG: f32 = 1.5;
+
+/// The camera's field of view, unscoped. A [`Use::zoom`] divides it.
+const FOV: f32 = 75.0 * std::f32::consts::PI / 180.0;
 
 const SKY: Color = Color::srgb(0.52, 0.72, 0.95);
 
@@ -151,6 +152,38 @@ impl Default for WorldBudget {
 #[derive(Resource, Default)]
 struct Welcomed(HashSet<PlayerId>);
 
+/// The block the local player is part-way through breaking.
+///
+/// Local, per-frame, and never sent: this is an input accumulator, like a held movement
+/// key, not world state. What it eventually *produces* — one edit — goes through the same
+/// host check as every other edit, and the host's [`EDIT_RATE`] is what bounds a client
+/// that skips the waiting. So a faster tool is a nicer game, never a bigger permission.
+#[derive(Resource, Default)]
+struct Digging(Option<Dig>);
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Dig {
+    block: BlockPos,
+    /// Zero to one. At one the block goes.
+    done: f32,
+}
+
+/// A moment more of chewing at `block`.
+///
+/// Progress belongs to *one* block: aiming somewhere else, or letting go, starts the next
+/// one from nothing. Without that a player chips away at soft ground and finishes the wall
+/// behind it in a frame.
+fn chew(previous: Option<Dig>, block: BlockPos, using: Use, dt: f32) -> Dig {
+    let done = match previous {
+        Some(d) if d.block == block => d.done,
+        _ => 0.0,
+    };
+    Dig {
+        block,
+        done: done + using.speed * dt,
+    }
+}
+
 #[derive(Component)]
 struct ChunkTag;
 
@@ -192,6 +225,7 @@ pub fn run(boot: Boot) -> anyhow::Result<()> {
     .init_resource::<Intent>()
     .init_resource::<Held>()
     .init_resource::<Chunks>()
+    .init_resource::<Digging>()
     .init_resource::<Peers>()
     .init_resource::<Inventories>()
     .init_resource::<Welcomed>()
@@ -205,6 +239,7 @@ pub fn run(boot: Boot) -> anyhow::Result<()> {
             apply_intent,
             net_receive,
             target_and_edit,
+            aim_zoom,
             craft_on_request,
             stream_chunks,
             remesh_dirty,
@@ -244,7 +279,7 @@ fn setup(
     commands.spawn((
         Camera3d::default(),
         Projection::Perspective(PerspectiveProjection {
-            fov: 75f32.to_radians(),
+            fov: FOV,
             far: 1200.0,
             ..default()
         }),
@@ -354,12 +389,12 @@ fn apply_intent(
     }
 }
 
-/// Is the block within arm's length of a player standing at `actor`? Measured eye to
-/// nearest point of the block, which is the same thing the client's raycast bounds.
-fn within_reach(actor: Vec3, pos: BlockPos) -> bool {
+/// Is the block within `reach` of a player standing at `actor`? Measured eye to nearest
+/// point of the block, which is the same thing the client's raycast bounds.
+fn within_reach(actor: Vec3, pos: BlockPos, reach: f32) -> bool {
     let eye = actor + Vec3::Y * player::EYE_HEIGHT;
     let corner = pos.corner();
-    eye.distance(eye.clamp(corner, corner + Vec3::ONE)) <= REACH + REACH_LAG
+    eye.distance(eye.clamp(corner, corner + Vec3::ONE)) <= reach + REACH_LAG
 }
 
 /// Every rule an edit must satisfy, in one place, applied by the host to its own player
@@ -372,14 +407,17 @@ fn within_reach(actor: Vec3, pos: BlockPos) -> bool {
 /// `standing` is every player the host knows the position of, the actor included. A block
 /// placed inside somebody wedges *them*, so whose box it is does not matter — checking only
 /// the placer's own box left "build into the person next to you" wide open.
+///
+/// `reach` is how far this player's own things let them work — see [`Inventory::reach`].
 fn edit_is_legal(
     world: &World,
     actor: Vec3,
     standing: &[Vec3],
     pos: BlockPos,
     block: Block,
+    reach: f32,
 ) -> bool {
-    if !within_reach(actor, pos) {
+    if !within_reach(actor, pos, reach) {
         return false;
     }
     match block {
@@ -416,7 +454,10 @@ fn apply_if_legal(
     // asked about rather than deciding blind. `stream_chunks` drops it again on its next
     // pass if nobody is near it.
     sim.load_chunk(pos.chunk());
-    if !edit_is_legal(sim, actor, standing, pos, block) {
+    // How far this player may work is read off their own pile, here, rather than taken
+    // from anything they said: a gun is a thing the host handed them, and it is the host
+    // that decides what one is worth.
+    if !edit_is_legal(sim, actor, standing, pos, block, inventory.reach()) {
         return false;
     }
     // What this costs and what it yields, both decided before the world moves: `set_block`
@@ -559,6 +600,11 @@ fn mark_dirty(chunks: &mut Chunks, pos: BlockPos) {
     }
 }
 
+/// The block a use is chewed down to before it goes, drawn as the highlight shrinking. A
+/// block that visibly disappears as you work at it is the only thing on screen that says a
+/// drill is faster than a fist.
+const DUG_SCALE: f32 = 0.45;
+
 #[allow(clippy::too_many_arguments)]
 fn target_and_edit(
     intent: Res<Intent>,
@@ -566,18 +612,39 @@ fn target_and_edit(
     role: Res<NetRole>,
     held: Res<Held>,
     peers: Res<Peers>,
+    time: Res<Time>,
     session: NonSend<Session>,
     mut sim: ResMut<Sim>,
     mut chunks: ResMut<Chunks>,
     mut inventories: ResMut<Inventories>,
+    mut digging: ResMut<Digging>,
     mut highlight: Query<(&mut Transform, &mut Visibility), With<Highlight>>,
 ) {
-    let hit = raycast::cast(&sim.0, me.0.eye(), me.0.look_dir(), REACH);
+    // One table decides everything about the thing in hand: how far it works, how fast it
+    // chews, and how far it zooms. There is no per-item branch below, and adding a tool
+    // needs no change here at all.
+    let using = inventories.of(session.me()).using(held.0);
+    let hit = raycast::cast(&sim.0, me.0.eye(), me.0.look_dir(), using.reach);
+
+    // A long frame must not be a free block: the same clamp `apply_intent` puts on motion.
+    let dt = time.delta_secs().min(0.05);
+    digging.0 = match (intent.use_item, hit) {
+        (true, Some(h)) => Some(chew(digging.0, h.block, using, dt)),
+        _ => None,
+    };
+    // Broken through. Forgetting the dig here is what stops a peer — whose block does not
+    // vanish until the host says so — asking again every frame while the answer is in
+    // flight; it starts the block over instead.
+    let broke_through = digging.0.is_some_and(|d| d.done >= 1.0);
+    if broke_through {
+        digging.0 = None;
+    }
 
     if let Ok((mut t, mut vis)) = highlight.single_mut() {
         match hit {
             Some(h) => {
                 t.translation = h.block.center();
+                t.scale = Vec3::splat(1.0 - DUG_SCALE * digging.0.map_or(0.0, |d| d.done));
                 *vis = Visibility::Visible;
             }
             None => *vis = Visibility::Hidden,
@@ -588,11 +655,11 @@ fn target_and_edit(
 
     // What the button asks for. Whether it is allowed is the host's call, not this
     // client's — see `edit_is_legal`.
-    let edit = if intent.break_block {
+    let edit = if broke_through {
         Some((hit.block, Block::Air))
     } else if intent.place_block {
-        // Holding something that is not a block places nothing: a rifle has no behaviour
-        // yet, and pretending the button is broken is better than pretending it is a rifle.
+        // Holding something that is not a block places nothing: a rifle puts nothing in
+        // the world, and pretending the button is broken beats pretending it is a block.
         held.0.places().map(|block| (hit.adjacent(), block))
     } else {
         None
@@ -617,6 +684,38 @@ fn target_and_edit(
             &standing,
             request,
         );
+    }
+}
+
+/// The scope. The view narrows while a scoped tool is being used, and springs back the
+/// moment the trigger is let go.
+///
+/// One button does both because the Deck's other trigger is the place button: holding R2
+/// with the rifle is aiming *and* firing, which is also how a six-year-old expects a
+/// trigger to work. Read from the same [`Use`] the reach and the speed come from, so a
+/// scope is a number in the registry and not a rifle-shaped branch in the camera code.
+fn aim_zoom(
+    intent: Res<Intent>,
+    held: Res<Held>,
+    inventories: Res<Inventories>,
+    session: NonSend<Session>,
+    mut camera: Query<&mut Projection, With<Camera3d>>,
+) {
+    let zoom = if intent.use_item {
+        inventories.of(session.me()).using(held.0).zoom
+    } else {
+        1.0
+    };
+    let Ok(mut projection) = camera.single_mut() else {
+        return;
+    };
+    if let Projection::Perspective(p) = &mut *projection {
+        let fov = FOV / zoom;
+        // Only on a change: assigning through the `Mut` marks the projection dirty, and a
+        // dirty projection is a matrix rebuilt for a camera that did not move.
+        if p.fov != fov {
+            p.fov = fov;
+        }
     }
 }
 
@@ -908,10 +1007,9 @@ fn net_send_pose(
     held: Res<Held>,
     inventories: Res<Inventories>,
 ) {
-    // An empty hand is what a player with none of the item they have *selected* has: the
-    // hotbar cursor may sit on a car you have not built yet, and showing everyone a car
-    // you do not own is a lie the network would happily carry.
-    let holding = Some(held.0).filter(|item| inventories.of(session.me()).count(*item) > 0);
+    // What is in the hand, not what the cursor is on: the same question the use button
+    // asks, so the cube everyone else sees is the thing that just broke their wall.
+    let holding = inventories.of(session.me()).in_hand(held.0);
     session.send(
         Target::All,
         Msg::Pose {
@@ -1162,11 +1260,12 @@ mod tests {
         iroh::SecretKey::from_bytes(&[n; 32]).public()
     }
 
-    /// A player with plenty of everything, so a test about the world's rules is not
-    /// quietly answered by an empty pocket.
+    /// A player with plenty of every *block*, so a test about the world's rules is not
+    /// quietly answered by an empty pocket — and with no gun, because reach is the rule
+    /// most of these tests are about and a rifle in the pocket answers half of them.
     fn stocked() -> Inventory {
         let mut inv = Inventory::default();
-        for item in Item::ALL {
+        for item in Item::ALL.iter().filter(|i| i.places().is_some()) {
             inv.add(*item, 64);
         }
         inv
@@ -1304,12 +1403,87 @@ mod tests {
     #[test]
     fn an_edit_out_of_reach_is_refused() {
         let (mut world, mut chunks, feet, _) = standing_in_a_loaded_world();
-        // The far corner of the same chunk: ~10 blocks away, well past REACH.
+        // The far corner of the same chunk: ~10 blocks away, well past an arm.
         let far = BlockPos::new(0, world.ground_height(0, 0), 0);
         assert!(world.solid(far), "the test needs a real block over there");
-        assert!(!within_reach(feet, far));
+        assert!(!within_reach(feet, far, Use::BARE_HAND.reach));
         assert!(!apply_alone(&mut world, &mut chunks, feet, far, Block::Air));
         assert!(world.solid(far), "an unreachable block is untouched");
+    }
+
+    /// A gun's whole point is the block you cannot walk to, so the host has to allow the
+    /// range — and allow it from the pile it keeps itself, not from a claim. An empty
+    /// pocket still reaches an arm's length and no further.
+    #[test]
+    fn a_rifle_reaches_across_the_valley_and_a_fist_does_not() {
+        let (mut world, mut chunks, feet, _) = standing_in_a_loaded_world();
+        let far = BlockPos::new(0, world.ground_height(0, 0), 0);
+        let break_it = |world: &mut World, chunks: &mut Chunks, inv: &mut Inventory| {
+            apply_if_legal(world, chunks, inv, feet, &[feet], far, Block::Air)
+        };
+
+        assert!(
+            !break_it(&mut world, &mut chunks, &mut stocked()),
+            "an arm does not reach the next hill"
+        );
+        let mut armed = stocked();
+        armed.add(Item::Rifle, 1);
+        assert!(
+            break_it(&mut world, &mut chunks, &mut armed),
+            "a rifle does"
+        );
+        assert_eq!(world.block(far), Block::Air);
+    }
+
+    /// Nothing may dig faster than the host will accept edits, or the best tool in the
+    /// game is the one whose blocks silently stop breaking after the first burst.
+    #[test]
+    fn no_tool_outruns_the_edit_budget() {
+        for item in Item::ALL {
+            assert!(
+                item.using().speed <= EDIT_RATE,
+                "{item:?} digs {} blocks a second, past the {EDIT_RATE} allowed",
+                item.using().speed
+            );
+        }
+    }
+
+    /// Breaking takes time, and how much is the whole difference between the tools. The
+    /// numbers a player feels: a fist is about half a second, a drill about an eighth.
+    #[test]
+    fn a_drill_breaks_a_block_sooner_than_a_fist() {
+        let block = BlockPos::new(3, 40, 3);
+        let seconds_to_break = |using: Use| {
+            let mut dig = None;
+            let mut ticks = 0;
+            while !dig.is_some_and(|d: Dig| d.done >= 1.0) {
+                dig = Some(chew(dig, block, using, 1.0 / 60.0));
+                ticks += 1;
+                assert!(ticks < 6000, "a use that never breaks anything");
+            }
+            ticks as f32 / 60.0
+        };
+        let hand = seconds_to_break(Use::BARE_HAND);
+        let drill = seconds_to_break(Item::Drill.using());
+        assert!((0.4..0.6).contains(&hand), "a fist took {hand}s");
+        assert!(drill < hand / 3.0, "a drill took {drill}s against {hand}s");
+        assert!(seconds_to_break(Item::Hammer.using()) < hand);
+    }
+
+    /// Progress is one block's, not the player's. Without that, chipping at soft ground
+    /// and then aiming at a wall takes the wall with it.
+    #[test]
+    fn looking_away_starts_the_next_block_from_nothing() {
+        let (soft, wall) = (BlockPos::new(0, 40, 0), BlockPos::new(1, 40, 0));
+        let using = Item::Hammer.using();
+
+        let mut dig = chew(None, soft, using, 0.08);
+        dig = chew(Some(dig), soft, using, 0.08);
+        assert!(dig.done > 0.5 && dig.done < 1.0, "part way into the ground");
+
+        let moved = chew(Some(dig), wall, using, 0.01);
+        assert_eq!(moved.block, wall);
+        assert!(moved.done < 0.1, "the wall inherited the hole's progress");
     }
 
     #[test]
