@@ -2,9 +2,10 @@
 //! joining.
 //!
 //! [`Role`] is consulted only where authority differs: [`authorized`] (whose word counts),
-//! [`submit_edit`] (who may change the world), [`net_receive`] (who relays), and the
-//! status line. Everything else is role-blind, which is what "single player is
-//! multiplayer with zero peers" has to mean if it is going to stay true.
+//! [`submit_edit`] (who may change the world), [`net_receive`] (who relays), [`run`] and
+//! [`update_status`] (which of the two the player is told they are). Everything else is
+//! role-blind, which is what "single player is multiplayer with zero peers" has to mean if
+//! it is going to stay true.
 
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
@@ -12,9 +13,9 @@ use std::collections::{HashMap, HashSet};
 
 use crate::avatar;
 use crate::input::{Intent, PITCH_LIMIT, gather_intent};
-use crate::mesh::build_chunk_mesh;
+use crate::mesh::{ChunkMesh, build_chunk_mesh};
 use crate::net::{Boot, Event, Msg, PlayerId, Pose, Role, Session, Target};
-use crate::player::{self, Held, Player};
+use crate::player::{self, Held, Motion, Player};
 use crate::raycast;
 use crate::registry::{Block, Item};
 use crate::world::{BlockPos, CHUNK_SIZE, ChunkPos, World};
@@ -290,12 +291,11 @@ fn apply_intent(
     p.yaw += intent.look.x;
     p.pitch = (p.pitch + intent.look.y).clamp(-PITCH_LIMIT, PITCH_LIMIT);
     if intent.toggle_fly {
-        p.flying = !p.flying;
-        p.velocity = Vec3::ZERO;
+        p.toggle_fly();
     }
 
     let (forward, right) = p.move_basis();
-    let speed = if p.flying {
+    let speed = if p.is_flying() {
         player::FLY_SPEED
     } else if intent.sprint {
         player::SPRINT_SPEED
@@ -304,26 +304,26 @@ fn apply_intent(
     };
     let horizontal = (forward * intent.walk.y + right * intent.walk.x) * speed;
 
-    let delta = if p.flying {
-        p.velocity = Vec3::ZERO;
-        (horizontal + Vec3::Y * intent.vertical * player::FLY_SPEED) * dt
-    } else {
-        if intent.jump && p.grounded {
-            p.velocity.y = player::JUMP_SPEED;
+    let delta = match &mut p.motion {
+        Motion::Flying => (horizontal + Vec3::Y * intent.vertical * player::FLY_SPEED) * dt,
+        Motion::Walking { velocity, grounded } => {
+            if intent.jump && *grounded {
+                velocity.y = player::JUMP_SPEED;
+            }
+            velocity.y = (velocity.y - player::GRAVITY * dt).max(-player::MAX_FALL_SPEED);
+            (horizontal + Vec3::Y * velocity.y) * dt
         }
-        p.velocity.y = (p.velocity.y - player::GRAVITY * dt).max(-player::MAX_FALL_SPEED);
-        (horizontal + Vec3::Y * p.velocity.y) * dt
     };
 
-    let expected_y = p.pos.y + delta.y;
-    let (pos, grounded) = player::move_and_slide(&sim.0, p.pos, delta);
-    // Hitting a floor or a ceiling kills the vertical velocity; without the ceiling half,
-    // a jump under an overhang leaves the player pinned there until gravity wins.
-    if (pos.y - expected_y).abs() > 1e-4 {
-        p.velocity.y = 0.0;
+    let moved = player::move_and_slide(&sim.0, p.pos, delta);
+    p.pos = moved.pos;
+    if let Motion::Walking { velocity, grounded } = &mut p.motion {
+        // Whatever stopped the move kills the speed along that axis. The ceiling half
+        // matters as much as the floor: without it, a jump under an overhang leaves the
+        // player pinned there until gravity wins.
+        *velocity = Vec3::select(moved.blocked, Vec3::ZERO, *velocity);
+        *grounded = moved.grounded;
     }
-    p.pos = pos;
-    p.grounded = grounded && !p.flying;
 
     if let Some(slot) = intent.item_pick {
         held.0 = Item::from_slot(slot);
@@ -338,17 +338,6 @@ fn apply_intent(
         t.translation = p.eye();
         t.rotation = Quat::from_euler(EulerRot::YXZ, p.yaw, p.pitch, 0.0);
     }
-}
-
-/// Does a block at `pos` overlap the box of a player standing at `actor`? Placing there
-/// would trap them inside the world.
-fn would_trap(actor: Vec3, pos: BlockPos) -> bool {
-    let min = actor - Vec3::new(player::HALF_WIDTH, 0.0, player::HALF_WIDTH);
-    let max = actor + Vec3::new(player::HALF_WIDTH, player::HEIGHT, player::HALF_WIDTH);
-    let b = pos.corner();
-    (min.x < b.x + 1.0 && max.x > b.x)
-        && (min.y < b.y + 1.0 && max.y > b.y)
-        && (min.z < b.z + 1.0 && max.z > b.z)
 }
 
 /// Is the block within arm's length of a player standing at `actor`? Measured eye to
@@ -374,7 +363,7 @@ fn edit_is_legal(world: &World, actor: Vec3, pos: BlockPos, block: Block) -> boo
         Block::Air => world.block(pos) != Block::Bedrock,
         // Placing: only a voxel some item actually places, only into empty space, and
         // never inside the player doing it.
-        _ => block.placeable() && world.block(pos) == Block::Air && !would_trap(actor, pos),
+        _ => block.placeable() && world.block(pos) == Block::Air && !player::would_trap(actor, pos),
     }
 }
 
@@ -747,25 +736,17 @@ fn stream_chunks(
         if chebyshev(*cp, center) > VIEW_RADIUS || chunks.entities.contains_key(cp) {
             continue;
         }
-        if !neighbours_loaded(&sim.0, *cp) {
-            continue;
-        }
-        refresh_chunk(
+        if refresh_chunk(
             &mut commands,
             &mut meshes,
             &material,
             &mut chunks,
             &sim.0,
             *cp,
-        );
-        built += 1;
+        ) {
+            built += 1;
+        }
     }
-}
-
-fn neighbours_loaded(world: &World, cp: ChunkPos) -> bool {
-    [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)]
-        .into_iter()
-        .all(|(dx, dz)| world.is_loaded(ChunkPos::new(cp.x + dx, cp.z + dz)))
 }
 
 fn remesh_dirty(
@@ -777,20 +758,29 @@ fn remesh_dirty(
 ) {
     let dirty: Vec<ChunkPos> = chunks.dirty.drain().collect();
     for cp in dirty {
-        if sim.0.is_loaded(cp) && chunks.entities.contains_key(&cp) {
-            refresh_chunk(
-                &mut commands,
-                &mut meshes,
-                &material,
-                &mut chunks,
-                &sim.0,
-                cp,
-            );
+        // A chunk with no entity has never been drawn; `stream_chunks` builds it from
+        // scratch, and from current voxels, when it comes into view.
+        if !chunks.entities.contains_key(&cp) {
+            continue;
+        }
+        let meshed = refresh_chunk(
+            &mut commands,
+            &mut meshes,
+            &material,
+            &mut chunks,
+            &sim.0,
+            cp,
+        );
+        // Not meshable yet — a neighbour is unloaded. Dropping it here would leave the
+        // edit undrawn until something else happened to dirty the chunk, so it waits.
+        if !meshed {
+            chunks.dirty.insert(cp);
         }
     }
 }
 
-/// Rebuilds one chunk's mesh entity, creating it if it doesn't exist yet.
+/// Rebuilds one chunk's mesh entity, creating it if it doesn't exist yet. False if the
+/// chunk isn't meshable yet, in which case nothing is spawned or changed.
 fn refresh_chunk(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -798,7 +788,13 @@ fn refresh_chunk(
     chunks: &mut Chunks,
     world: &World,
     cp: ChunkPos,
-) {
+) -> bool {
+    let mesh = match build_chunk_mesh(world, cp) {
+        ChunkMesh::Ready(mesh) => Some(mesh),
+        ChunkMesh::Empty => None,
+        ChunkMesh::NotReady => return false,
+    };
+
     let origin = cp.origin();
     let translation = Vec3::new(origin.x as f32, 0.0, origin.z as f32);
     let entity = *chunks.entities.entry(cp).or_insert_with(|| {
@@ -807,7 +803,7 @@ fn refresh_chunk(
             .id()
     });
 
-    match build_chunk_mesh(world, cp) {
+    match mesh {
         Some(mesh) => {
             commands
                 .entity(entity)
@@ -819,6 +815,7 @@ fn refresh_chunk(
             commands.entity(entity).remove::<Mesh3d>();
         }
     }
+    true
 }
 
 fn update_status(
@@ -832,7 +829,11 @@ fn update_status(
     let Ok(mut text) = text.single_mut() else {
         return;
     };
-    let mode = if me.0.flying { "flying" } else { "walking" };
+    let mode = if me.0.is_flying() {
+        "flying"
+    } else {
+        "walking"
+    };
     // The ticket gets its own line: 64 characters do not share a row with anything else
     // on the Deck's 1280px panel.
     let who = match role.0 {
@@ -879,20 +880,54 @@ mod tests {
         assert_eq!(chunks.dirty.len(), 1, "an interior edit touches one chunk");
     }
 
+    /// An edit next to an unloaded chunk cannot be meshed without drawing a wall along
+    /// that seam, so the chunk stays dirty and is remeshed when the neighbour arrives.
+    /// Dropping it instead loses the edit until something else dirties the chunk — and
+    /// `stream_chunks` will not rebuild one that already has an entity.
     #[test]
-    fn placing_a_block_inside_yourself_is_refused() {
-        let feet = Vec3::new(8.5, 10.0, 8.5);
-        assert!(would_trap(feet, BlockPos::new(8, 10, 8)), "feet");
-        assert!(would_trap(feet, BlockPos::new(8, 11, 8)), "head");
+    fn an_unmeshable_dirty_chunk_waits_for_its_neighbour() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let cp = ChunkPos::new(0, 0);
+        let mut sim = World::new(5, []);
+        for (dx, dz) in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)] {
+            sim.load_chunk(ChunkPos::new(cp.x + dx, cp.z + dz));
+        }
+
+        let mut ecs = bevy::ecs::world::World::new();
+        let entity = ecs.spawn_empty().id();
+        ecs.insert_resource(Sim(sim));
+        ecs.insert_resource(WorldMaterial(
+            Assets::<StandardMaterial>::default().add(StandardMaterial::default()),
+        ));
+        ecs.insert_resource(Assets::<Mesh>::default());
+        ecs.insert_resource(Chunks {
+            entities: HashMap::from([(cp, entity)]),
+            dirty: HashSet::from([cp]),
+        });
+
+        ecs.run_system_once(remesh_dirty).unwrap();
         assert!(
-            !would_trap(feet, BlockPos::new(8, 9, 8)),
-            "the floor is fine"
+            ecs.resource::<Chunks>().dirty.is_empty(),
+            "a meshable chunk is meshed and done"
         );
+
+        ecs.resource_mut::<Sim>()
+            .0
+            .unload_chunk(ChunkPos::new(1, 0));
+        ecs.resource_mut::<Chunks>().dirty.insert(cp);
+        ecs.run_system_once(remesh_dirty).unwrap();
         assert!(
-            !would_trap(feet, BlockPos::new(8, 12, 8)),
-            "above the head is fine"
+            ecs.resource::<Chunks>().dirty.contains(&cp),
+            "the edit must not be dropped on the floor"
         );
-        assert!(!would_trap(feet, BlockPos::new(7, 10, 8)), "beside is fine");
+
+        ecs.resource_mut::<Sim>().0.load_chunk(ChunkPos::new(1, 0));
+        ecs.run_system_once(remesh_dirty).unwrap();
+        assert!(
+            ecs.resource::<Chunks>().dirty.is_empty(),
+            "and it is drawn once the neighbour is there"
+        );
     }
 
     /// A deterministic stand-in player id. Ids are public keys, so distinct seed bytes

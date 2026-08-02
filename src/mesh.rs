@@ -58,14 +58,32 @@ const FACES: [Face; 6] = [
     },
 ];
 
+/// What one chunk has to draw.
+pub enum ChunkMesh {
+    /// Geometry for the renderer.
+    Ready(Mesh),
+    /// Nothing visible in this chunk. An empty mesh is an entity and a draw call for
+    /// nothing, so it gets neither.
+    Empty,
+    /// Not meshable yet: this chunk, or one of the four it shares a seam with, is not
+    /// loaded. Ask again once they are.
+    NotReady,
+}
+
 /// Builds the mesh for one chunk, in chunk-local coordinates (the entity carries the
-/// chunk's world translation). `None` when the chunk has no visible faces at all — an
-/// empty mesh is an entity and a draw call for nothing.
+/// chunk's world translation).
 ///
-/// Neighbouring chunks must be loaded first: an unloaded neighbour reads as air, which
-/// would draw a wall of faces along the seam.
-pub fn build_chunk_mesh(world: &World, cp: ChunkPos) -> Option<Mesh> {
-    let chunk = world.chunk(cp)?;
+/// The chunk's four seam neighbours must be loaded, because [`World::block`] reads an
+/// unloaded chunk as air and a seam meshed against air is a full-height wall of faces.
+/// That check lives here and not in the callers: a caller that skips it draws a wall
+/// nothing heals, since a chunk that already has a mesh is never rebuilt unasked.
+pub fn build_chunk_mesh(world: &World, cp: ChunkPos) -> ChunkMesh {
+    let Some(chunk) = world.chunk(cp) else {
+        return ChunkMesh::NotReady;
+    };
+    if !seams_loaded(world, cp) {
+        return ChunkMesh::NotReady;
+    }
     let origin = cp.origin();
 
     // Chunk-local neighbour read. Everything but the four seam planes is already in the
@@ -118,7 +136,7 @@ pub fn build_chunk_mesh(world: &World, cp: ChunkPos) -> Option<Mesh> {
     }
 
     if indices.is_empty() {
-        return None;
+        return ChunkMesh::Empty;
     }
 
     // RENDER_WORLD only: nothing reads a chunk mesh back — collision and picking ask the
@@ -131,7 +149,14 @@ pub fn build_chunk_mesh(world: &World, cp: ChunkPos) -> Option<Mesh> {
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_indices(Indices::U32(indices));
-    Some(mesh)
+    ChunkMesh::Ready(mesh)
+}
+
+/// Are the four chunks this one shares a seam with loaded?
+fn seams_loaded(world: &World, cp: ChunkPos) -> bool {
+    [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        .into_iter()
+        .all(|(dx, dz)| world.is_loaded(ChunkPos::new(cp.x + dx, cp.z + dz)))
 }
 
 #[cfg(test)]
@@ -146,11 +171,22 @@ mod tests {
             .len()
     }
 
-    /// A loaded chunk emptied of terrain, so a test can state the world it means to mesh
-    /// instead of inheriting whatever worldgen happens to put there.
+    fn built(world: &World, cp: ChunkPos) -> Mesh {
+        match build_chunk_mesh(world, cp) {
+            ChunkMesh::Ready(mesh) => mesh,
+            ChunkMesh::Empty => panic!("expected faces, got an empty chunk"),
+            ChunkMesh::NotReady => panic!("expected a meshable chunk"),
+        }
+    }
+
+    /// A chunk emptied of terrain — with its seam neighbours loaded, since a chunk is not
+    /// meshable without them — so a test can state the world it means to mesh instead of
+    /// inheriting whatever worldgen happens to put there.
     fn air_chunk(cp: ChunkPos) -> World {
         let mut w = World::new(5, []);
-        w.load_chunk(cp);
+        for (dx, dz) in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)] {
+            w.load_chunk(ChunkPos::new(cp.x + dx, cp.z + dz));
+        }
         let origin = cp.origin();
         for y in 0..WORLD_HEIGHT {
             for z in 0..CHUNK_SIZE {
@@ -170,7 +206,7 @@ mod tests {
                 w.load_chunk(ChunkPos::new(cx, cz));
             }
         }
-        let mesh = build_chunk_mesh(&w, ChunkPos::new(0, 0)).expect("terrain has faces");
+        let mesh = built(&w, ChunkPos::new(0, 0));
         assert!(vertex_count(&mesh) > 100);
         assert_eq!(vertex_count(&mesh) % 4, 0, "faces are quads");
     }
@@ -178,7 +214,49 @@ mod tests {
     #[test]
     fn an_all_air_chunk_meshes_to_nothing() {
         let cp = ChunkPos::new(0, 0);
-        assert!(build_chunk_mesh(&air_chunk(cp), cp).is_none());
+        assert!(matches!(
+            build_chunk_mesh(&air_chunk(cp), cp),
+            ChunkMesh::Empty
+        ));
+    }
+
+    /// An unloaded neighbour reads as air, so meshing against it draws a face for every
+    /// solid block along the seam — a full-height wall you can see from across the world,
+    /// and one nothing re-meshes away. The mesher refuses instead, and says so.
+    #[test]
+    fn a_chunk_is_not_meshed_against_an_unloaded_neighbour() {
+        let cp = ChunkPos::new(0, 0);
+        let mut w = World::new(5, []);
+        for (dx, dz) in [(0, 0), (1, 0), (-1, 0), (0, 1)] {
+            w.load_chunk(ChunkPos::new(cp.x + dx, cp.z + dz));
+        }
+        assert!(
+            matches!(build_chunk_mesh(&w, cp), ChunkMesh::NotReady),
+            "the -Z neighbour is missing"
+        );
+
+        w.load_chunk(ChunkPos::new(0, -1));
+        let mesh = built(&w, cp);
+
+        // What the wall would have been: one face per solid block in the seam plane.
+        let wall = (0..WORLD_HEIGHT)
+            .flat_map(|y| (0..CHUNK_SIZE).map(move |x| BlockPos::new(x, y, 0)))
+            .filter(|p| w.solid(*p))
+            .count();
+        let positions = mesh
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .unwrap()
+            .as_float3();
+        let normals = mesh.attribute(Mesh::ATTRIBUTE_NORMAL).unwrap().as_float3();
+        let seam = std::iter::zip(positions.unwrap(), normals.unwrap())
+            .filter(|(p, n)| p[2] == 0.0 && **n == [0.0, 0.0, -1.0])
+            .count()
+            / 4;
+        assert!(wall > 100, "the seam plane needs terrain to be about");
+        assert!(
+            seam < wall / 4,
+            "{seam} faces on a seam of {wall} blocks — the neighbour is being read as air"
+        );
     }
 
     /// Interior faces must be culled: a lump of blocks draws its shell and nothing else,
@@ -199,7 +277,7 @@ mod tests {
                 }
             }
         }
-        let shell = build_chunk_mesh(&w, cp).map(|m| vertex_count(&m)).unwrap();
+        let shell = vertex_count(&built(&w, cp));
         assert_eq!(
             shell,
             6 * 9 * 4,
@@ -208,7 +286,7 @@ mod tests {
 
         // Hollow it: the six blocks around the cavity now each face air.
         w.set_block(BlockPos::new(7, 6, 7), Block::Air);
-        let hollow = build_chunk_mesh(&w, cp).map(|m| vertex_count(&m)).unwrap();
+        let hollow = vertex_count(&built(&w, cp));
         assert_eq!(
             hollow,
             shell + 6 * 4,
@@ -223,7 +301,7 @@ mod tests {
         let cp = ChunkPos::new(0, 0);
         let mut w = air_chunk(cp);
         w.set_block(BlockPos::new(8, 0, 8), Block::Bedrock);
-        let mesh = build_chunk_mesh(&w, cp).expect("the floor block has faces");
+        let mesh = built(&w, cp);
         assert_eq!(vertex_count(&mesh), 5 * 4, "five faces, never the sixth");
         let normals = mesh.attribute(Mesh::ATTRIBUTE_NORMAL).unwrap().as_float3();
         assert!(
@@ -260,8 +338,11 @@ mod tests {
     }
 
     #[test]
-    fn unmeshed_chunk_is_none() {
+    fn an_unloaded_chunk_is_not_meshable() {
         let w = World::new(5, []);
-        assert!(build_chunk_mesh(&w, ChunkPos::new(9, 9)).is_none());
+        assert!(matches!(
+            build_chunk_mesh(&w, ChunkPos::new(9, 9)),
+            ChunkMesh::NotReady
+        ));
     }
 }
