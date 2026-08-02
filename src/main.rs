@@ -10,6 +10,7 @@ mod input;
 mod mesh;
 mod net;
 mod player;
+mod portrait;
 mod raycast;
 mod registry;
 mod world;
@@ -39,11 +40,20 @@ enum Command {
         #[arg(value_name = "TICKET")]
         ticket: net::PlayerId,
     },
+    /// Render the player model to a PNG. Regenerates `docs/spaceman.png`.
+    Portrait {
+        #[arg(long, default_value = "docs/spaceman.png")]
+        out: std::path::PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let join = cli.command.map(|Command::Join { ticket }| ticket);
+    let join = match cli.command {
+        Some(Command::Portrait { out }) => return portrait::run(out),
+        Some(Command::Join { ticket }) => Some(ticket),
+        None => None,
+    };
     let seed = cli.seed.unwrap_or_else(fresh_seed);
     game::run(net::boot(join, seed)?)
 }

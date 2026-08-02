@@ -1,9 +1,10 @@
 //! The player model — **the one place a body is built.**
 //!
-//! Drawn from `design/spaceman-avatar.jpg`: white suit, teal trim, bubble helmet with a
-//! dark visor, backpack, chest panel, mitten hands, knee patches, boots. Every part is
-//! the same unit cube scaled and placed, so the whole model is the [`SPACEMAN`] table and
-//! swapping it for a different body is an edit to that table — no other file changes.
+//! Drawn from `design/spaceman-avatar.jpg`: a white suit with teal trim, a bubble helmet
+//! whose dark visor is ringed in teal, a backpack, a chest panel with a rocket on it,
+//! mitten hands, knee patches and boots. Every part is the same unit cube scaled and
+//! placed, so the whole model is the [`SPACEMAN`] table and swapping it for a different
+//! body is an edit to that table — no other file changes.
 //!
 //! Coordinates are relative to the player's feet, in blocks: `+Y` is up, `-Z` is the way
 //! they are facing.
@@ -13,10 +14,14 @@ use bevy::prelude::*;
 /// Which material a part is painted with. Add a colour here and to [`Palette`] together.
 #[derive(Clone, Copy)]
 pub enum Skin {
+    /// The white suit.
     Suit,
+    /// Teal: trim, boots, mittens, the visor ring.
     Trim,
+    /// Grey hardware — the backpack.
     Gear,
-    Visor,
+    /// Near-black gloss: the visor, and the rocket inked on the chest panel.
+    Dark,
 }
 
 pub struct Part {
@@ -31,29 +36,57 @@ const fn part(skin: Skin, size: [f32; 3], at: [f32; 3]) -> Part {
     Part { skin, size, at }
 }
 
+/// Front face of the torso. Anything decorating the chest sits just proud of it, so the
+/// panel and the rocket on it are stacked in `z` from this one number.
+const CHEST_Z: f32 = -0.13;
+
 /// The spaceman, one row per box.
 pub const SPACEMAN: &[Part] = &[
-    // legs and boots
+    // legs, knee patches, boots
     part(Skin::Suit, [0.20, 0.62, 0.20], [-0.13, 0.46, 0.0]),
     part(Skin::Suit, [0.20, 0.62, 0.20], [0.13, 0.46, 0.0]),
-    part(Skin::Trim, [0.22, 0.16, 0.22], [-0.13, 0.62, 0.0]), // knee patch
-    part(Skin::Trim, [0.22, 0.16, 0.22], [0.13, 0.62, 0.0]),
-    part(Skin::Gear, [0.24, 0.15, 0.30], [-0.13, 0.075, -0.03]), // boot
-    part(Skin::Gear, [0.24, 0.15, 0.30], [0.13, 0.075, -0.03]),
-    // torso
+    part(Skin::Trim, [0.22, 0.15, 0.22], [-0.13, 0.50, 0.0]),
+    part(Skin::Trim, [0.22, 0.15, 0.22], [0.13, 0.50, 0.0]),
+    part(Skin::Trim, [0.24, 0.16, 0.30], [-0.13, 0.08, -0.03]),
+    part(Skin::Trim, [0.24, 0.16, 0.30], [0.13, 0.08, -0.03]),
+    // torso, belt, and the collar ring the helmet sits in
     part(Skin::Suit, [0.46, 0.58, 0.26], [0.0, 1.06, 0.0]),
-    part(Skin::Trim, [0.48, 0.09, 0.28], [0.0, 0.80, 0.0]), // belt
-    part(Skin::Trim, [0.20, 0.20, 0.03], [0.0, 1.12, -0.14]), // chest panel (rocket motif)
-    part(Skin::Gear, [0.30, 0.38, 0.14], [0.0, 1.10, 0.19]), // backpack
-    // arms, held a little out from the body like the drawing
-    part(Skin::Suit, [0.15, 0.50, 0.15], [-0.31, 1.10, 0.0]),
-    part(Skin::Suit, [0.15, 0.50, 0.15], [0.31, 1.10, 0.0]),
-    part(Skin::Trim, [0.18, 0.15, 0.18], [-0.31, 0.80, 0.0]), // mitten
-    part(Skin::Trim, [0.18, 0.15, 0.18], [0.31, 0.80, 0.0]),
-    // helmet: a teal ring with a white bubble inside and a dark visor at the front
-    part(Skin::Trim, [0.42, 0.40, 0.42], [0.0, 1.58, 0.0]),
-    part(Skin::Suit, [0.36, 0.34, 0.36], [0.0, 1.58, 0.0]),
-    part(Skin::Visor, [0.26, 0.22, 0.04], [0.0, 1.60, -0.20]),
+    part(Skin::Trim, [0.48, 0.09, 0.28], [0.0, 0.815, 0.0]),
+    part(Skin::Trim, [0.40, 0.08, 0.28], [0.0, 1.36, 0.0]),
+    // backpack, with a tank strapped either side of it
+    part(Skin::Gear, [0.32, 0.40, 0.14], [0.0, 1.10, 0.19]),
+    part(Skin::Trim, [0.07, 0.30, 0.07], [-0.10, 1.12, 0.28]),
+    part(Skin::Trim, [0.07, 0.30, 0.07], [0.10, 1.12, 0.28]),
+    // arms, held clear of the body like the drawing, with shoulder pads and mittens. The
+    // gap to the torso is what makes them read as arms and not as a wider chest.
+    part(Skin::Suit, [0.15, 0.60, 0.15], [-0.35, 1.02, 0.0]),
+    part(Skin::Suit, [0.15, 0.60, 0.15], [0.35, 1.02, 0.0]),
+    part(Skin::Trim, [0.20, 0.10, 0.20], [-0.35, 1.33, 0.0]),
+    part(Skin::Trim, [0.20, 0.10, 0.20], [0.35, 1.33, 0.0]),
+    // mittens hang below the belt, or the two teal bands merge into one from a distance
+    part(Skin::Trim, [0.19, 0.16, 0.19], [-0.35, 0.68, 0.0]),
+    part(Skin::Trim, [0.19, 0.16, 0.19], [0.35, 0.68, 0.0]),
+    // chest panel: a teal frame around a white plate, with a rocket on it
+    part(Skin::Trim, [0.26, 0.26, 0.02], [0.0, 1.12, CHEST_Z - 0.01]),
+    part(Skin::Suit, [0.20, 0.20, 0.02], [0.0, 1.12, CHEST_Z - 0.02]),
+    part(Skin::Dark, [0.06, 0.11, 0.02], [0.0, 1.13, CHEST_Z - 0.03]), // rocket body
+    part(Skin::Dark, [0.03, 0.04, 0.02], [0.0, 1.20, CHEST_Z - 0.03]), // nose
+    part(
+        Skin::Dark,
+        [0.03, 0.05, 0.02],
+        [-0.05, 1.06, CHEST_Z - 0.03],
+    ), // fins
+    part(Skin::Dark, [0.03, 0.05, 0.02], [0.05, 1.06, CHEST_Z - 0.03]),
+    part(Skin::Trim, [0.03, 0.03, 0.02], [0.0, 1.05, CHEST_Z - 0.04]), // exhaust
+    part(Skin::Trim, [0.03, 0.03, 0.02], [0.0, 1.15, CHEST_Z - 0.04]), // porthole
+    // helmet: a white bubble, a dark visor across the front, teal ringing it
+    part(Skin::Suit, [0.42, 0.40, 0.42], [0.0, 1.57, 0.0]),
+    part(Skin::Trim, [0.44, 0.06, 0.44], [0.0, 1.74, 0.0]), // crown band
+    part(Skin::Dark, [0.26, 0.22, 0.04], [0.0, 1.58, -0.21]),
+    part(Skin::Trim, [0.33, 0.04, 0.03], [0.0, 1.71, -0.215]), // visor ring
+    part(Skin::Trim, [0.33, 0.04, 0.03], [0.0, 1.45, -0.215]),
+    part(Skin::Trim, [0.04, 0.30, 0.03], [-0.145, 1.58, -0.215]),
+    part(Skin::Trim, [0.04, 0.30, 0.03], [0.145, 1.58, -0.215]),
 ];
 
 /// The materials [`SPACEMAN`] paints with. One per [`Skin`].
@@ -63,7 +96,7 @@ pub struct Palette {
     suit: Handle<StandardMaterial>,
     trim: Handle<StandardMaterial>,
     gear: Handle<StandardMaterial>,
-    visor: Handle<StandardMaterial>,
+    dark: Handle<StandardMaterial>,
 }
 
 impl Palette {
@@ -80,7 +113,7 @@ impl Palette {
             suit: paint(0.93, 0.94, 0.95, 0.85),
             trim: paint(0.10, 0.60, 0.60, 0.7),
             gear: paint(0.55, 0.58, 0.62, 0.8),
-            visor: paint(0.06, 0.09, 0.12, 0.25),
+            dark: paint(0.06, 0.09, 0.12, 0.25),
         }
     }
 
@@ -89,7 +122,7 @@ impl Palette {
             Skin::Suit => self.suit.clone(),
             Skin::Trim => self.trim.clone(),
             Skin::Gear => self.gear.clone(),
-            Skin::Visor => self.visor.clone(),
+            Skin::Dark => self.dark.clone(),
         }
     }
 }
@@ -145,5 +178,28 @@ mod tests {
                 "part {i} has a zero dimension"
             );
         }
+    }
+
+    /// The chest decoration is a stack of thin plates on the torso's front face: frame,
+    /// then plate, then rocket. A plate level with the layer under it z-fights into a
+    /// flicker — the sort of thing you only ever see on someone else's screen.
+    #[test]
+    fn the_chest_stack_is_layered() {
+        let mut layers: Vec<f32> = SPACEMAN
+            .iter()
+            .filter(|p| p.at[2] < CHEST_Z && p.at[1] < 1.3)
+            .map(|p| p.at[2] - p.size[2] / 2.0)
+            .collect();
+        assert!(layers.len() >= 6, "the chest panel lost its plates");
+        assert!(
+            layers.iter().all(|z| *z < CHEST_Z),
+            "a chest plate is buried in the torso"
+        );
+        layers.sort_by(f32::total_cmp);
+        layers.dedup();
+        assert!(
+            layers.len() >= 3,
+            "frame, plate and rocket must sit at three different depths"
+        );
     }
 }
