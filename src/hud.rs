@@ -33,6 +33,32 @@ pub struct StatusText;
 #[derive(Component)]
 pub struct RecipeText;
 
+/// Something the game said and will stop saying.
+#[derive(Component)]
+pub struct NoticeText;
+
+/// How long a notice stays up. Long enough to read a file path off a handheld held at
+/// arm's length, twice.
+const NOTICE_SECONDS: f32 = 9.0;
+
+/// A line the game says to the player once — where the join ticket went, mostly — and
+/// then stops saying.
+///
+/// Timed rather than dismissed: the player who pressed share is on their way back to the
+/// world, and a message that needs acknowledging is one more thing between them and it.
+#[derive(Resource, Default)]
+pub struct Notice {
+    text: String,
+    left: f32,
+}
+
+impl Notice {
+    pub fn say(&mut self, text: String) {
+        self.text = text;
+        self.left = NOTICE_SECONDS;
+    }
+}
+
 /// The ring around one cell — coloured when that cell is selected.
 #[derive(Component)]
 pub struct HotbarCell(Item);
@@ -80,6 +106,31 @@ pub fn setup(mut commands: Commands) {
             ..default()
         },
         BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)),
+    ));
+
+    // Top centre: the one part of the screen neither the status line nor the hotbar
+    // wants, and where the eye already is.
+    commands.spawn((
+        NoticeText,
+        Text::new(""),
+        TextFont {
+            font_size: 26.0,
+            ..default()
+        },
+        TextColor(Color::srgb(1.0, 0.9, 0.5)),
+        TextLayout::new_with_justify(Justify::Center),
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(70.0),
+            left: Val::Percent(15.0),
+            width: Val::Percent(70.0),
+            padding: UiRect::axes(Val::Px(12.0), Val::Px(8.0)),
+            ..default()
+        },
+        BackgroundColor(Color::NONE),
+        // Above the pause menu, which is what the player is looking at when this
+        // appears.
+        GlobalZIndex(20),
     ));
 
     commands
@@ -229,6 +280,32 @@ fn health_bar(me: &Player) -> String {
 fn write(text: &mut Mut<Text>, line: String) {
     if text.0 != line {
         text.0 = line;
+    }
+}
+
+/// Shows the current [`Notice`] and counts it down to nothing.
+///
+/// The plate behind it goes away with the text: an empty black bar hanging at the top of
+/// the screen for the rest of the session is worse than no notice at all.
+pub fn fade_notice(
+    time: Res<Time>,
+    mut notice: ResMut<Notice>,
+    mut shown: Query<(&mut Text, &mut BackgroundColor), With<NoticeText>>,
+) {
+    if notice.left > 0.0 {
+        notice.left = (notice.left - time.delta_secs()).max(0.0);
+    }
+    let Ok((mut text, mut plate)) = shown.single_mut() else {
+        return;
+    };
+    let (line, behind) = if notice.left > 0.0 {
+        (notice.text.clone(), Color::srgba(0.0, 0.0, 0.0, 0.75))
+    } else {
+        (String::new(), Color::NONE)
+    };
+    write(&mut text, line);
+    if plate.0 != behind {
+        plate.0 = behind;
     }
 }
 

@@ -131,12 +131,15 @@ fn codec() -> impl bincode::Options {
         .with_limit(MAX_FRAME_LEN as u64)
 }
 
-pub fn encode(msg: &Msg) -> Result<Vec<u8>> {
+/// Generic over the message so [`crate::net::lan`]'s discovery datagrams go through this
+/// codec too, rather than picking bincode settings of their own that could drift from
+/// these.
+pub fn encode<T: Serialize>(msg: &T) -> Result<Vec<u8>> {
     use bincode::Options;
     Ok(codec().serialize(msg)?)
 }
 
-pub fn decode(bytes: &[u8]) -> Result<Msg> {
+pub fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     use bincode::Options;
     Ok(codec().deserialize(bytes)?)
 }
@@ -269,7 +272,7 @@ mod tests {
     #[test]
     fn a_pose_round_trips_whatever_is_in_the_hand() {
         for m in every_pose() {
-            assert_eq!(decode(&encode(&m).unwrap()).unwrap(), m);
+            assert_eq!(decode::<Msg>(&encode(&m).unwrap()).unwrap(), m);
         }
     }
 
@@ -307,7 +310,7 @@ mod tests {
 
     #[test]
     fn garbage_is_rejected_not_panicked_on() {
-        assert!(decode(&[0xff; 8]).is_err());
+        assert!(decode::<Msg>(&[0xff; 8]).is_err());
     }
 
     /// A peer on a newer build must not be able to name a block this build doesn't have.
@@ -331,7 +334,7 @@ mod tests {
         // One past the last block this build knows: the off-by-one a newer peer would
         // send. Blocks are append-only, so the last variant declared is the highest id.
         bytes[id] = Block::Cushion as u8 + 1;
-        assert!(decode(&bytes).is_err());
+        assert!(decode::<Msg>(&bytes).is_err());
     }
 
     /// A frame padded out with junk must not decode. Otherwise a one-byte message can be
@@ -340,9 +343,12 @@ mod tests {
     #[test]
     fn trailing_bytes_are_rejected() {
         let mut bytes = encode(&Msg::Hello).unwrap();
-        assert!(decode(&bytes).is_ok());
+        assert!(decode::<Msg>(&bytes).is_ok());
         bytes.extend_from_slice(&[0u8; 64]);
-        assert!(decode(&bytes).is_err(), "padding decoded as a valid Hello");
+        assert!(
+            decode::<Msg>(&bytes).is_err(),
+            "padding decoded as a valid Hello"
+        );
     }
 
     #[test]
@@ -351,7 +357,7 @@ mod tests {
         let header: [u8; LEN_PREFIX] = frame[..LEN_PREFIX].try_into().unwrap();
         let len = frame_len(header).unwrap();
         assert_eq!(len, frame.len() - LEN_PREFIX);
-        assert!(!decode(&frame[LEN_PREFIX..]).unwrap().via_datagram());
+        assert!(!decode::<Msg>(&frame[LEN_PREFIX..]).unwrap().via_datagram());
     }
 
     /// The header is a peer's unverified claim, and the reader sizes its buffer from it.

@@ -9,12 +9,13 @@
 //! stranger cannot get a message *in* to a peer at all. The other half is
 //! [`crate::game::authorized`], which decides what a sender is entitled to say.
 
+pub mod lan;
 pub mod wire;
 
 use anyhow::{Context, Result, anyhow};
-use iroh::Endpoint;
 use iroh::endpoint::{Connection, SendStream, presets};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+use iroh::{Endpoint, EndpointAddr};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -87,6 +88,9 @@ pub struct Boot {
     pub role: Role,
     pub seed: u64,
     pub edits: Vec<(BlockPos, Block)>,
+    /// Answers "who is hosting?" on the LAN. A host has one unless the discovery port
+    /// was already taken; a peer never does — it has nothing to serve anyone.
+    pub beacon: Option<lan::Beacon>,
 }
 
 /// A live network session. Dropping it tears the endpoint down.
@@ -94,7 +98,7 @@ pub struct Session {
     /// The tokio runtime the connection tasks live on. Held so they keep running; the
     /// game never blocks on it — sends and receives are non-blocking channel ops.
     _rt: tokio::runtime::Runtime,
-    _router: Router,
+    router: Router,
     me: PlayerId,
     inbox: mpsc::UnboundedReceiver<Event>,
     outbox: mpsc::UnboundedSender<Outbound>,
@@ -108,6 +112,13 @@ impl Session {
 
     pub fn ticket(&self) -> String {
         self.me.to_string()
+    }
+
+    /// Where this endpoint can currently be reached — read afresh each time, because
+    /// iroh learns addresses after the endpoint is up and a stale list is a game nobody
+    /// on the LAN can dial.
+    pub fn addr(&self) -> EndpointAddr {
+        self.router.endpoint().addr()
     }
 
     /// Non-blocking: returns everything that arrived since the last call.
@@ -226,11 +237,17 @@ struct Bus {
     inbox: mpsc::UnboundedSender<Event>,
 }
 
-/// Starts the network. `join` is `None` to host, or the ticket of a host to join.
+/// Starts the network. `join` is `None` to host, or where to find a host to join —
+/// a bare [`PlayerId`] from a pasted ticket, or one with addresses attached from
+/// [`lan`]. Both are the same dial: LAN discovery fills in addresses, it does not
+/// change how a peer connects.
+///
+/// `name` is what this machine's game is called on the LAN, and is only used when
+/// hosting.
 ///
 /// Joining blocks until the host's `Welcome` arrives, so the game is built with a
 /// complete world in hand and no "world not ready yet" state exists to handle.
-pub fn boot(join: Option<PlayerId>, seed: u64) -> Result<Boot> {
+pub fn boot(join: Option<EndpointAddr>, seed: u64, name: &str) -> Result<Boot> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -261,11 +278,12 @@ pub fn boot(join: Option<PlayerId>, seed: u64) -> Result<Boot> {
             Some(_) => Router::builder(endpoint.clone()).spawn(),
         };
 
-        let (seed, edits) = match join {
+        let (seed, edits) = match join.clone() {
             None => (seed, Vec::new()),
-            Some(host) => {
+            Some(addr) => {
+                let host = addr.id;
                 let conn = endpoint
-                    .connect(host, ALPN)
+                    .connect(addr, ALPN)
                     .await
                     .with_context(|| format!("connecting to host {host}"))?;
                 let bus = bus.clone();
@@ -280,16 +298,32 @@ pub fn boot(join: Option<PlayerId>, seed: u64) -> Result<Boot> {
         anyhow::Ok((me, router, seed, edits))
     })?;
 
+    // A host that cannot claim the discovery port is still a perfectly good host — its
+    // ticket works — so this says so and carries on rather than refusing to start. Said
+    // out loud, because a game silently missing from every join menu on the network is
+    // the kind of thing somebody spends an evening on.
+    let beacon = match &join {
+        Some(_) => None,
+        None => match lan::Beacon::open(name.to_string(), lan::PORT) {
+            Ok(beacon) => Some(beacon),
+            Err(e) => {
+                eprintln!("this game will not appear on the LAN join menu: {e:#}");
+                None
+            }
+        },
+    };
+
     Ok(Boot {
         role: match join {
             None => Role::Host,
-            Some(host) => Role::Peer { host },
+            Some(addr) => Role::Peer { host: addr.id },
         },
         seed,
         edits,
+        beacon,
         session: Session {
             _rt: rt,
-            _router: router,
+            router,
             me,
             inbox: inbox_rx,
             outbox: out_tx,

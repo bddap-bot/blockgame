@@ -14,11 +14,20 @@ What gets added on top is `design/`'s business.
 nix-shell --run 'cargo run --release'
 ```
 
-It prints a ticket. Anyone can join with it:
+You land on a title screen: **Start a new world**, and under it every world being hosted
+on this network, by the name of the machine hosting it. D-pad to choose, `A` to go. No
+typing, which is the point — the players are on Steam Decks in gaming mode.
+
+A friend who is *not* on this network needs the ticket. Pause (`Start` / `Esc`) →
+**Share the join ticket**: it goes on the clipboard and into
+`~/.local/share/blockgame/ticket.txt`, which is how you get it off a Deck over ssh. Then:
 
 ```sh
 nix-shell --run 'cargo run --release -- join <TICKET>'
 ```
+
+The LAN list is discovery and nothing more — a name and an address, shouted over UDP
+broadcast and answered. What happens next is the same iroh connection a ticket makes.
 
 There is no separate server. Running `blockgame` on its own *is* hosting a world with
 nobody else in it, so "single player" and "multiplayer" are the same program on the same
@@ -42,7 +51,11 @@ joining player ignores their own seed and gets the host's world.
 | hotbar         | `1`–`9`, `Q`/`E` | d-pad                |
 | craft          | `C`              | `X`                  |
 | get in / out   | `R`              | `B`                  |
-| quit           | `Esc`            | `Select` + `Start`   |
+| pause menu     | `Esc`            | `Start`              |
+| menus          | arrows, `Enter`  | d-pad / stick, `A`   |
+
+Quitting is a row on the pause menu, along with sharing the join ticket. It used to be a
+`Select`+`Start` chord, which nobody who had not read the source could find.
 
 In the car the left stick is the whole of it: forward and back is the throttle, left and
 right is the steering. Everything else works from the seat.

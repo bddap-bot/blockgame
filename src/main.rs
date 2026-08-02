@@ -1,20 +1,25 @@
 //! `blockgame` — a Minecraft-like voxel game built to be extended.
 //!
-//! Run it with no arguments to play your own world. That world is already a server with
-//! nobody connected: the ticket it prints is all a friend needs to join it, and the same
-//! code runs either way.
+//! Run it with no arguments and pick from the title screen: start your own world, or
+//! join one somebody on this network is already hosting. Your world is already a server
+//! with nobody connected — the ticket it prints, and the one the pause menu shares, is
+//! all a friend somewhere else needs — and the same code runs either way.
 
 mod avatar;
 mod game;
 mod hud;
 mod input;
 mod inventory;
+mod menu;
 mod mesh;
 mod net;
+mod pause;
 mod player;
 mod portrait;
 mod raycast;
 mod registry;
+mod ticket;
+mod title;
 mod vehicle;
 mod world;
 
@@ -39,7 +44,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Join a friend's world with the ticket they printed.
+    /// Join a friend's world with the ticket they printed. The join menu covers anybody
+    /// on the same network; this is for a friend who is not.
     Join {
         #[arg(value_name = "TICKET")]
         ticket: net::PlayerId,
@@ -86,8 +92,14 @@ fn main() -> Result<()> {
     if join.is_some() && cli.seed.is_some() {
         anyhow::bail!("--seed picks a world to host; a joiner gets the host's world");
     }
-    let seed = cli.seed.unwrap_or_else(fresh_seed);
-    game::run(net::boot(join, seed)?)
+    game::run(title::Start {
+        seed: cli.seed.unwrap_or_else(fresh_seed),
+        name: net::lan::this_machine(),
+        // A ticket carries no addresses, so this is the dial that leans on iroh's
+        // address lookup — which is the right one for a friend who is not on this
+        // network, and the whole reason the flag stays.
+        join: join.map(iroh::EndpointAddr::new),
+    })
 }
 
 /// A different world each launch. Only the host ever picks one — everyone else is told

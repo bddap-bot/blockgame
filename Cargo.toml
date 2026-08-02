@@ -15,6 +15,9 @@ bincode = "1"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 bytes = "1"
+# Copying the join ticket out of the game. `image-data` is off: a clipboard that carries
+# pictures would drag in a whole image stack to move sixty-four characters of hex.
+arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
 
 # A voxel world is meshing-bound and pointer-chasing-heavy: unoptimized dependency code
 # turns a walkable world into a slideshow, so dev builds optimize deps hard and our own

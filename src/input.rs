@@ -29,7 +29,9 @@ pub struct KeyBinds {
     pub sprint: KeyCode,
     pub descend: KeyCode,
     pub toggle_fly: KeyCode,
-    pub quit: KeyCode,
+    /// Opens the pause menu, which is where quitting and sharing the world's ticket
+    /// live. There is no key that quits outright: an unconfirmed quit is a lost world.
+    pub pause: KeyCode,
     /// Held down to swing, drill or fire — see [`crate::registry::Use`]. Held rather than
     /// tapped because breaking a block takes time now, and how long it takes is the whole
     /// difference between a fist and a drill.
@@ -58,7 +60,7 @@ pub const KEYS: KeyBinds = KeyBinds {
     sprint: KeyCode::ShiftLeft,
     descend: KeyCode::ControlLeft,
     toggle_fly: KeyCode::KeyF,
-    quit: KeyCode::Escape,
+    pause: KeyCode::Escape,
     use_item: MouseButton::Left,
     place_block: MouseButton::Right,
     craft: KeyCode::KeyC,
@@ -105,10 +107,11 @@ pub struct PadBinds {
     pub prev_item: GamepadButton,
     pub next_row: GamepadButton,
     pub prev_row: GamepadButton,
-    /// Held together to quit. A chord because quitting is instant and unconfirmed, and
-    /// these two are the only buttons no gameplay action uses — a thumb cannot land on
-    /// both mid-build.
-    pub quit: [GamepadButton; 2],
+    /// Start — opens the pause menu, where quitting and sharing this world's ticket
+    /// live. It used to take a two-button chord to quit, which nobody who had not read
+    /// the source could find; a menu you can see is worth more than a chord you cannot
+    /// hit by accident.
+    pub pause: GamepadButton,
 }
 
 pub const PAD: PadBinds = PadBinds {
@@ -124,7 +127,7 @@ pub const PAD: PadBinds = PadBinds {
     prev_item: GamepadButton::DPadLeft,
     next_row: GamepadButton::DPadDown,
     prev_row: GamepadButton::DPadUp,
-    quit: [GamepadButton::Select, GamepadButton::Start],
+    pause: GamepadButton::Start,
 };
 
 /// What the player asked for this frame, device-independent.
@@ -151,7 +154,26 @@ pub struct Intent {
     pub craft: bool,
     /// Get into your car, or out of it. Tapped: held, it would be a door flapping.
     pub ride: bool,
-    pub quit: bool,
+    /// Open the pause menu.
+    pub pause: bool,
+}
+
+/// What the player asked of a menu.
+///
+/// Separate from [`Intent`] because a menu is asked different questions than a world is,
+/// and folding "which row" into "which way am I walking" would put a cursor on every
+/// gameplay system's plate. The *bindings* are shared where they overlap — confirm is
+/// [`PadBinds::jump`], the same A that jumps — so a button means one thing everywhere.
+#[derive(Resource, Default, Debug, Clone, Copy)]
+pub struct MenuIntent {
+    /// Rows to move the cursor, this frame.
+    pub step: i32,
+    pub confirm: bool,
+    /// Back out: leave the pause menu, or leave the game from the title.
+    pub back: bool,
+    /// Whether the stick was already pushed last frame. A held stick steps once, not
+    /// once per frame — a list that scrolls at 60 rows a second is unusable.
+    stick_pushed: bool,
 }
 
 fn deadzoned(v: Vec2) -> Vec2 {
@@ -185,7 +207,7 @@ pub fn gather_intent(
     out.place_block = mouse.just_pressed(KEYS.place_block);
     out.craft = keys.just_pressed(KEYS.craft);
     out.ride = keys.just_pressed(KEYS.ride);
-    out.quit = keys.just_pressed(KEYS.quit);
+    out.pause = keys.just_pressed(KEYS.pause);
     out.item_delta =
         keys.just_pressed(KEYS.next_item) as i32 - keys.just_pressed(KEYS.prev_item) as i32;
     for (slot, key) in KEYS.slots.iter().enumerate() {
@@ -218,12 +240,48 @@ pub fn gather_intent(
         out.item_delta += (pad.just_pressed(PAD.next_row) as i32
             - pad.just_pressed(PAD.prev_row) as i32)
             * HOTBAR_COLUMNS as i32;
-        out.quit |= PAD.quit.iter().all(|&b| pad.pressed(b));
+        out.pause |= pad.just_pressed(PAD.pause);
     }
 
     out.walk = out.walk.clamp_length_max(1.0);
     out.vertical = out.vertical.clamp(-1.0, 1.0);
     *intent = out;
+}
+
+/// The menu's own read of the same devices. Runs while a menu is up and nowhere else, so
+/// a d-pad press cannot both walk the hotbar and move a menu cursor.
+pub fn gather_menu_intent(
+    keys: Res<ButtonInput<KeyCode>>,
+    pads: Query<&Gamepad>,
+    mut menu: ResMut<MenuIntent>,
+) {
+    let key_step =
+        |up: KeyCode, down: KeyCode| keys.just_pressed(down) as i32 - keys.just_pressed(up) as i32;
+    let mut out = MenuIntent {
+        step: key_step(KeyCode::ArrowUp, KeyCode::ArrowDown) + key_step(KEYS.forward, KEYS.back),
+        confirm: keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::Space),
+        back: keys.just_pressed(KEYS.pause),
+        stick_pushed: false,
+    };
+
+    for pad in &pads {
+        out.step += pad.just_pressed(PAD.next_row) as i32 - pad.just_pressed(PAD.prev_row) as i32;
+        out.confirm |= pad.just_pressed(PAD.jump);
+        // B backs out, and so does Start — whichever button opened this, the same one
+        // and the obvious one both close it.
+        out.back |= pad.just_pressed(PAD.ride) || pad.just_pressed(PAD.pause);
+        // The stick reads as a d-pad: pushed past the deadzone is one step, and it has
+        // to come back to centre before it gives another.
+        let pushed = deadzoned(pad.left_stick()).y;
+        if pushed != 0.0 {
+            out.stick_pushed = true;
+            if !menu.stick_pushed {
+                out.step += if pushed < 0.0 { 1 } else { -1 };
+            }
+        }
+    }
+
+    *menu = out;
 }
 
 #[cfg(test)]

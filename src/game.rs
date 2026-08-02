@@ -13,14 +13,17 @@ use std::collections::{HashMap, HashSet};
 
 use crate::avatar;
 use crate::hud;
-use crate::input::{Intent, PITCH_LIMIT, gather_intent};
+use crate::input::{Intent, MenuIntent, PITCH_LIMIT, gather_intent, gather_menu_intent};
 use crate::inventory::{Held, Inventories, Inventory};
 use crate::mesh::{ChunkMesh, build_chunk_mesh};
 use crate::net::wire::CarPose;
-use crate::net::{Boot, Event, Msg, PlayerId, Pose, Role, Session, Target};
+use crate::net::{Boot, Event, Msg, PlayerId, Pose, Role, Session, Target, lan};
+use crate::pause;
 use crate::player::{self, Player};
 use crate::raycast;
 use crate::registry::{Block, Class, Item, Use};
+use crate::ticket::Share;
+use crate::title::{self, Booted, Phase, Playing, Start};
 use crate::vehicle::{self, Ride};
 use crate::world::{BlockPos, CHUNK_SIZE, ChunkPos, World};
 
@@ -206,13 +209,114 @@ struct ChunkTag;
 struct Highlight;
 
 /// Builds and runs the game. Returns when the window closes.
-pub fn run(boot: Boot) -> anyhow::Result<()> {
+///
+/// The app starts on the title screen with no world and no network: which world this is
+/// is a choice the player has not made yet, and a ticket on the command line is that
+/// same choice made early. [`Phase`] is what keeps the world's systems away from the
+/// frames where there is no world.
+pub fn run(start: Start) -> anyhow::Result<()> {
+    let mut app = App::new();
+    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+        primary_window: Some(Window {
+            title: "blockgame".into(),
+            resolution: (1280u32, 800u32).into(),
+            ..default()
+        }),
+        ..default()
+    }))
+    .insert_resource(ClearColor(SKY))
+    .insert_resource(start)
+    .init_state::<Phase>()
+    .add_sub_state::<Playing>()
+    .init_resource::<Intent>()
+    .init_resource::<MenuIntent>()
+    .init_resource::<Held>()
+    .init_resource::<Chunks>()
+    .init_resource::<Digging>()
+    .init_resource::<Peers>()
+    .init_resource::<Cars>()
+    .init_resource::<Inventories>()
+    .init_resource::<Welcomed>()
+    .init_resource::<WorldBudget>()
+    .init_resource::<hud::Notice>()
+    .insert_non_send_resource(Booted::default())
+    .insert_non_send_resource(Share::default())
+    // Menus read the pad every frame, whichever one is up and whether one is up at all:
+    // a menu that only reads input while it is open cannot see the press that opened it.
+    .add_systems(PreUpdate, gather_menu_intent)
+    .add_systems(OnEnter(Phase::Title), title::enter)
+    .add_systems(OnExit(Phase::Title), title::leave)
+    .add_systems(
+        Update,
+        (
+            title::look_for_games,
+            title::choose,
+            title::wait_for_the_world,
+            title::redraw,
+        )
+            .chain()
+            .run_if(in_state(Phase::Title)),
+    )
+    .add_systems(
+        OnEnter(Phase::World),
+        (enter_world, setup, hud::setup).chain(),
+    )
+    .add_systems(OnEnter(Playing::Paused), pause::open)
+    .add_systems(OnExit(Playing::Paused), pause::close)
+    .add_systems(
+        Update,
+        (pause::drive, pause::redraw)
+            .chain()
+            .run_if(in_state(Playing::Paused)),
+    )
+    .add_systems(
+        Update,
+        (
+            // Gameplay input alone stops while the pause menu is up. The world keeps
+            // running behind it — a host that froze everybody else's game by reading a
+            // menu would be a worse thing than an unpaused world.
+            gather_intent.run_if(in_state(Playing::Live)),
+            mind_the_body,
+            park_or_ride,
+            apply_intent,
+            net_receive,
+            answer_join_questions,
+            draw_cars,
+            target_and_edit,
+            aim_zoom,
+            craft_on_request,
+            stream_chunks,
+            remesh_dirty,
+            net_send_pose,
+            hud::update_status,
+            hud::update_hotbar,
+            hud::fade_notice,
+            open_pause_menu.run_if(in_state(Playing::Live)),
+        )
+            .chain()
+            .run_if(in_state(Phase::World)),
+    );
+
+    // A bevy error exit is the process's error exit: swallowing it would report success to
+    // whatever launched the game while the window died of something.
+    match app.run() {
+        AppExit::Success => Ok(()),
+        AppExit::Error(code) => Err(anyhow::anyhow!("the game exited with code {code}")),
+    }
+}
+
+/// Turns the network the title screen booted into a world. Runs once, on the way in.
+fn enter_world(mut commands: Commands, mut booted: NonSendMut<Booted>) {
     let Boot {
         session,
         role,
         seed,
         edits,
-    } = boot;
+        beacon,
+    } = booted
+        .0
+        .take()
+        .expect("the world was entered without a network to run it on");
 
     let world = World::new(seed, edits);
     let spawn = player::spawn_point(&world);
@@ -224,57 +328,33 @@ pub fn run(boot: Boot) -> anyhow::Result<()> {
         );
     }
 
-    let mut app = App::new();
-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(Window {
-            title: "blockgame".into(),
-            resolution: (1280u32, 800u32).into(),
-            ..default()
-        }),
-        ..default()
-    }))
-    .insert_resource(ClearColor(SKY))
-    .insert_resource(Sim(world))
-    .insert_resource(Me(Player::spawn_at(spawn)))
-    .insert_resource(NetRole(role))
-    .init_resource::<Intent>()
-    .init_resource::<Held>()
-    .init_resource::<Chunks>()
-    .init_resource::<Digging>()
-    .init_resource::<Peers>()
-    .init_resource::<Cars>()
-    .init_resource::<Inventories>()
-    .init_resource::<Welcomed>()
-    .init_resource::<WorldBudget>()
-    .insert_non_send_resource(session)
-    .add_systems(Startup, (setup, hud::setup))
-    .add_systems(
-        Update,
-        (
-            gather_intent,
-            mind_the_body,
-            park_or_ride,
-            apply_intent,
-            net_receive,
-            draw_cars,
-            target_and_edit,
-            aim_zoom,
-            craft_on_request,
-            stream_chunks,
-            remesh_dirty,
-            net_send_pose,
-            hud::update_status,
-            hud::update_hotbar,
-            quit_on_request,
-        )
-            .chain(),
-    );
+    commands.insert_resource(Sim(world));
+    commands.insert_resource(Me(Player::spawn_at(spawn)));
+    commands.insert_resource(NetRole(role));
+    if let Some(beacon) = beacon {
+        commands.insert_resource(Beacon(beacon));
+    }
+    commands.queue(move |world: &mut bevy::ecs::world::World| {
+        world.insert_non_send_resource(session);
+    });
+}
 
-    // A bevy error exit is the process's error exit: swallowing it would report success to
-    // whatever launched the game while the window died of something.
-    match app.run() {
-        AppExit::Success => Ok(()),
-        AppExit::Error(code) => Err(anyhow::anyhow!("the game exited with code {code}")),
+/// This host's answer to "who is hosting?" on the LAN. Absent on a peer, and on a host
+/// whose discovery port was taken.
+#[derive(Resource)]
+struct Beacon(lan::Beacon);
+
+/// Tells anybody at a join menu on this network where to find this world. A frame's
+/// worth of non-blocking socket reads, and nothing at all when nobody is asking.
+fn answer_join_questions(beacon: Option<Res<Beacon>>, session: NonSend<Session>) {
+    if let Some(beacon) = beacon {
+        beacon.0.answer(&session.addr());
+    }
+}
+
+fn open_pause_menu(intent: Res<Intent>, mut playing: ResMut<NextState<Playing>>) {
+    if intent.pause {
+        playing.set(Playing::Paused);
     }
 }
 
@@ -336,10 +416,7 @@ fn setup(
         Visibility::Hidden,
     ));
 
-    if let Ok(mut c) = cursor.single_mut() {
-        c.grab_mode = CursorGrabMode::Locked;
-        c.visible = false;
-    }
+    grab_mouse(&mut cursor, true);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -394,12 +471,13 @@ fn apply_intent(
 /// One place, above everything that acts on an [`Intent`], so being winded gates driving,
 /// digging, placing, crafting and climbing into a car for free — rather than each of those
 /// systems having to remember a check, and one of them forgetting. Looking round and
-/// quitting survive: a child who cannot see out, or cannot put the game down, is stuck.
+/// pausing survive: a child who cannot see out, or cannot reach the menu that quits, is
+/// stuck.
 fn mind_the_body(me: Res<Me>, mut intent: ResMut<Intent>) {
     if !me.0.condition.on_their_feet() {
         *intent = Intent {
             look: intent.look,
-            quit: intent.quit,
+            pause: intent.pause,
             ..Intent::default()
         };
     }
@@ -1340,19 +1418,17 @@ fn refresh_chunk(
     true
 }
 
-fn quit_on_request(
-    intent: Res<Intent>,
-    mut exit: MessageWriter<AppExit>,
-    mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>,
-) {
-    if !intent.quit {
-        return;
-    }
+/// Takes the mouse, or gives it back. The pause menu needs a pointer the player can see
+/// and the world needs one it can keep, and this is the one place either happens.
+pub fn grab_mouse(cursor: &mut Query<&mut CursorOptions, With<PrimaryWindow>>, grabbed: bool) {
     if let Ok(mut c) = cursor.single_mut() {
-        c.grab_mode = CursorGrabMode::None;
-        c.visible = true;
+        c.grab_mode = if grabbed {
+            CursorGrabMode::Locked
+        } else {
+            CursorGrabMode::None
+        };
+        c.visible = !grabbed;
     }
-    exit.write(AppExit::Success);
 }
 
 #[cfg(test)]
