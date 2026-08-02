@@ -55,6 +55,42 @@ impl BlockPos {
     pub fn chunk(self) -> ChunkPos {
         ChunkPos::new(self.x.div_euclid(CHUNK_SIZE), self.z.div_euclid(CHUNK_SIZE))
     }
+
+    /// Where this block sits inside its own chunk ([`Self::chunk`]), or `None` if it is
+    /// outside the world vertically — the only way a block coordinate can fail to name a
+    /// slot, since X and Z wrap into a chunk for free.
+    pub fn local(self) -> Option<LocalPos> {
+        LocalPos::new(
+            self.x.rem_euclid(CHUNK_SIZE),
+            self.y,
+            self.z.rem_euclid(CHUNK_SIZE),
+        )
+    }
+}
+
+/// A block's slot inside one chunk. Only [`LocalPos::new`] makes one, so a [`Chunk`] read
+/// cannot address another column: `x`/`z` past [`CHUNK_SIZE`] would index the next column
+/// along and hand back its block as this one's.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LocalPos {
+    x: i32,
+    y: i32,
+    z: i32,
+}
+
+impl LocalPos {
+    /// `x`/`z` in `0..`[`CHUNK_SIZE`], `y` in `0..`[`WORLD_HEIGHT`]; anything else is not
+    /// a slot in a chunk and there is nothing truthful to return for it.
+    pub fn new(x: i32, y: i32, z: i32) -> Option<Self> {
+        let inside = (0..CHUNK_SIZE).contains(&x)
+            && (0..CHUNK_SIZE).contains(&z)
+            && (0..WORLD_HEIGHT).contains(&y);
+        inside.then_some(Self { x, y, z })
+    }
+
+    fn index(self) -> usize {
+        ((self.y * CHUNK_SIZE + self.z) * CHUNK_SIZE + self.x) as usize
+    }
 }
 
 /// A chunk column's coordinate, in chunks (multiply by [`CHUNK_SIZE`] for blocks).
@@ -81,19 +117,15 @@ pub struct Chunk {
 }
 
 impl Chunk {
-    fn index(x: i32, y: i32, z: i32) -> usize {
-        debug_assert!((0..CHUNK_SIZE).contains(&x) && (0..CHUNK_SIZE).contains(&z));
-        debug_assert!((0..WORLD_HEIGHT).contains(&y));
-        ((y * CHUNK_SIZE + z) * CHUNK_SIZE + x) as usize
+    /// Public so the mesher can read its own chunk directly: asking [`World::block`] for
+    /// every block's six neighbours is a `div_euclid` pair and a hashed chunk lookup
+    /// each, ~54k of them per chunk on the main thread.
+    pub fn get(&self, at: LocalPos) -> Block {
+        self.blocks[at.index()]
     }
 
-    /// Local-coordinate read. `x`/`z` in `0..CHUNK_SIZE`, `y` in `0..WORLD_HEIGHT`.
-    pub fn get(&self, x: i32, y: i32, z: i32) -> Block {
-        self.blocks[Self::index(x, y, z)]
-    }
-
-    fn set(&mut self, x: i32, y: i32, z: i32, b: Block) {
-        self.blocks[Self::index(x, y, z)] = b;
+    fn set(&mut self, at: LocalPos, b: Block) {
+        self.blocks[at.index()] = b;
     }
 }
 
@@ -188,13 +220,17 @@ impl World {
             // edits that turn out to ask for what is already there. That is where a
             // joiner's log gets pruned, since it arrives with no baselines at all.
             overlay.retain(|pos, o| {
-                let (lx, lz) = (pos.x.rem_euclid(CHUNK_SIZE), pos.z.rem_euclid(CHUNK_SIZE));
-                let generated = chunk.get(lx, pos.y, lz);
+                // `set_block` is the only door in and it refuses a block outside the
+                // world, so an edit that names no slot came from nowhere — drop it.
+                let Some(local) = pos.local() else {
+                    return false;
+                };
+                let generated = chunk.get(local);
                 o.generated = Some(generated);
                 if o.block == generated {
                     return false;
                 }
-                chunk.set(lx, pos.y, lz, o.block);
+                chunk.set(local, o.block);
                 true
             });
             if overlay.is_empty() {
@@ -213,15 +249,11 @@ impl World {
     /// Meshing relies on that: a chunk is only meshed once its neighbours are loaded, so
     /// "unloaded reads as air" never leaks a hole into a visible mesh.
     pub fn block(&self, pos: BlockPos) -> Block {
-        if !(0..WORLD_HEIGHT).contains(&pos.y) {
+        let Some(local) = pos.local() else {
             return Block::Air;
-        }
+        };
         match self.chunks.get(&pos.chunk()) {
-            Some(c) => c.get(
-                pos.x.rem_euclid(CHUNK_SIZE),
-                pos.y,
-                pos.z.rem_euclid(CHUNK_SIZE),
-            ),
+            Some(c) => c.get(local),
             None => Block::Air,
         }
     }
@@ -239,20 +271,19 @@ impl World {
     /// Returns `false` for an out-of-bounds write (a malformed or hostile peer message),
     /// which the caller drops rather than replicating.
     pub fn set_block(&mut self, pos: BlockPos, block: Block) -> bool {
-        if !(0..WORLD_HEIGHT).contains(&pos.y) {
+        let Some(local) = pos.local() else {
             return false;
-        }
+        };
         let cp = pos.chunk();
-        let (lx, lz) = (pos.x.rem_euclid(CHUNK_SIZE), pos.z.rem_euclid(CHUNK_SIZE));
         // What worldgen puts here, if that is known yet: an existing edit remembers it,
         // and otherwise an unedited loaded chunk still holds it.
         let generated = match self.edits.get(&cp).and_then(|c| c.get(&pos)) {
             Some(o) => o.generated,
-            None => self.chunks.get(&cp).map(|c| c.get(lx, pos.y, lz)),
+            None => self.chunks.get(&cp).map(|c| c.get(local)),
         };
 
         if let Some(c) = self.chunks.get_mut(&cp) {
-            c.set(lx, pos.y, lz, block);
+            c.set(local, block);
         }
 
         if generated == Some(block) {
@@ -409,7 +440,10 @@ fn generate_chunk(seed: u64, cp: ChunkPos) -> Chunk {
                 } else {
                     Block::Stone
                 };
-                chunk.set(lx, y, lz, b);
+                // `terrain_height` clamps well under the ceiling, so every block of the
+                // column it names is a slot in this chunk.
+                let at = LocalPos::new(lx, y, lz).expect("terrain fits under the world ceiling");
+                chunk.set(at, b);
             }
         }
     }
@@ -434,18 +468,16 @@ fn plant_tree(chunk: &mut Chunk, cp: ChunkPos, seed: u64, wx: i32, wz: i32, trun
     let top = base + trunk;
     let origin = cp.origin();
 
+    // A tree is planted from every chunk it reaches into, so most of what it asks for
+    // lands outside this one: not a slot here, nothing to write.
     let mut put = |pos: BlockPos, b: Block, overwrite_solid: bool| {
-        if !(0..WORLD_HEIGHT).contains(&pos.y) {
+        let Some(at) = LocalPos::new(pos.x - origin.x, pos.y, pos.z - origin.z) else {
+            return;
+        };
+        if !overwrite_solid && chunk.get(at) != Block::Air {
             return;
         }
-        let (lx, lz) = (pos.x - origin.x, pos.z - origin.z);
-        if !(0..CHUNK_SIZE).contains(&lx) || !(0..CHUNK_SIZE).contains(&lz) {
-            return;
-        }
-        if !overwrite_solid && chunk.get(lx, pos.y, lz) != Block::Air {
-            return;
-        }
-        chunk.set(lx, pos.y, lz, b);
+        chunk.set(at, b);
     };
 
     for y in (base + 1)..=top {
@@ -477,18 +509,79 @@ mod tests {
         w.overlays().iter().map(Vec::len).sum()
     }
 
-    #[test]
-    fn terrain_is_seed_deterministic() {
-        for (x, z) in [(0, 0), (17, -93), (-1000, 4321)] {
-            let a = terrain_height(42, x, z);
-            let b = terrain_height(42, x, z);
-            assert_eq!(a, b);
+    /// Every block three chunks' worth of worldgen produces for a seed, folded in a fixed
+    /// order into one number: heights, the sand/grass choice, trunks and canopies. A block
+    /// folds in as its declaration index — the same number it travels the wire as — so
+    /// reordering [`Block`] moves this too, and that reorder is a cross-build break as
+    /// surely as new terrain is.
+    fn worldgen_fingerprint(seed: u64) -> u64 {
+        let mut w = World::new(seed, []);
+        let mut acc = 0u64;
+        for cp in [
+            ChunkPos::new(0, 0),
+            ChunkPos::new(3, -2),
+            ChunkPos::new(-5, 7),
+        ] {
+            w.load_chunk(cp);
+            let chunk = w.chunk(cp).expect("just loaded");
+            for y in 0..WORLD_HEIGHT {
+                for z in 0..CHUNK_SIZE {
+                    for x in 0..CHUNK_SIZE {
+                        let at = LocalPos::new(x, y, z).expect("the chunk's own range");
+                        acc = splitmix64(acc ^ chunk.get(at) as u64);
+                    }
+                }
+            }
         }
+        acc
+    }
+
+    /// Worldgen is part of the wire format: peers trade a `u64` seed and each builds the
+    /// world from it, so two builds that disagree by one block cannot play together.
+    ///
+    /// A failure here means worldgen changed — every world anyone has already built in is
+    /// now a different world, and old and new builds desync. That is a deliberate act, not
+    /// a mystery: if the change was wanted, re-pin this number from the new output and
+    /// expect saved worlds to shift under their owners. If it was not, the change is a bug.
+    #[test]
+    fn worldgen_is_pinned() {
+        assert_eq!(worldgen_fingerprint(1337), 0xd14d_be43_e4b3_e882);
+    }
+
+    #[test]
+    fn different_seeds_give_different_terrain() {
         assert_ne!(
             (0..64).map(|x| terrain_height(1, x, 0)).collect::<Vec<_>>(),
             (0..64).map(|x| terrain_height(2, x, 0)).collect::<Vec<_>>(),
-            "different seeds should give different terrain"
         );
+    }
+
+    /// A local coordinate one past a chunk's edge names a slot in the next column along,
+    /// not this one, and `Chunk::get` would hand that block back as truth. The constructor
+    /// is the only way to make one, and it refuses.
+    #[test]
+    fn a_position_outside_a_chunk_is_not_a_local_position() {
+        assert!(LocalPos::new(0, 0, 0).is_some());
+        assert!(LocalPos::new(CHUNK_SIZE - 1, WORLD_HEIGHT - 1, CHUNK_SIZE - 1).is_some());
+        for (x, y, z) in [
+            (-1, 0, 0),
+            (CHUNK_SIZE, 0, 0),
+            (0, -1, 0),
+            (0, WORLD_HEIGHT, 0),
+            (0, 0, -1),
+            (0, 0, CHUNK_SIZE),
+        ] {
+            assert!(
+                LocalPos::new(x, y, z).is_none(),
+                "({x},{y},{z}) is not in a chunk"
+            );
+        }
+        // A world coordinate wraps into its own chunk rather than reaching past one.
+        assert_eq!(
+            BlockPos::new(-1, 5, CHUNK_SIZE).local(),
+            LocalPos::new(CHUNK_SIZE - 1, 5, 0)
+        );
+        assert_eq!(BlockPos::new(0, WORLD_HEIGHT, 0).local(), None);
     }
 
     /// Trunks are 4, 5 or 6 blocks. A signed-modulo bug once let the hash produce 2 and 3

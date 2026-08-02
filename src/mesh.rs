@@ -11,7 +11,7 @@
 //! [`crate::registry::Block`].
 
 use crate::registry::Block;
-use crate::world::{BlockPos, CHUNK_SIZE, ChunkPos, WORLD_HEIGHT, World};
+use crate::world::{BlockPos, CHUNK_SIZE, ChunkPos, LocalPos, WORLD_HEIGHT, World};
 use bevy::asset::RenderAssetUsages;
 use bevy::math::IVec3;
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology};
@@ -86,17 +86,15 @@ pub fn build_chunk_mesh(world: &World, cp: ChunkPos) -> ChunkMesh {
     }
     let origin = cp.origin();
 
-    // Chunk-local neighbour read. Everything but the four seam planes is already in the
-    // chunk we hold; going through `world` for those would be a `div_euclid` pair and a
-    // hashed chunk lookup per face — six per block, ~54k per chunk, on the main thread.
-    let neighbor = |x: i32, y: i32, z: i32| -> Block {
-        if !(0..CHUNK_SIZE).contains(&x) || !(0..CHUNK_SIZE).contains(&z) {
-            return world.block(BlockPos::new(origin.x + x, y, origin.z + z));
+    // Chunk-local read. Everything but the four seam planes is already in the chunk we
+    // hold; going through `world` for those would be a `div_euclid` pair and a hashed
+    // chunk lookup per face — six per block, ~54k per chunk, on the main thread. Whether
+    // a coordinate is one of ours is exactly what `LocalPos::new` answers.
+    let block_at = |x: i32, y: i32, z: i32| -> Block {
+        match LocalPos::new(x, y, z) {
+            Some(local) => chunk.get(local),
+            None => world.block(BlockPos::new(origin.x + x, y, origin.z + z)),
         }
-        if !(0..WORLD_HEIGHT).contains(&y) {
-            return Block::Air;
-        }
-        chunk.get(x, y, z)
     };
 
     let mut positions: Vec<[f32; 3]> = Vec::new();
@@ -107,7 +105,7 @@ pub fn build_chunk_mesh(world: &World, cp: ChunkPos) -> ChunkMesh {
     for y in 0..WORLD_HEIGHT {
         for z in 0..CHUNK_SIZE {
             for x in 0..CHUNK_SIZE {
-                let block = chunk.get(x, y, z);
+                let block = block_at(x, y, z);
                 if !block.visible() {
                     continue;
                 }
@@ -118,7 +116,7 @@ pub fn build_chunk_mesh(world: &World, cp: ChunkPos) -> ChunkMesh {
                     if y == 0 && n.y < 0 {
                         continue;
                     }
-                    if neighbor(x + n.x, y + n.y, z + n.z).visible() {
+                    if block_at(x + n.x, y + n.y, z + n.z).visible() {
                         continue;
                     }
                     let base = positions.len() as u32;
