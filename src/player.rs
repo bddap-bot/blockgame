@@ -207,8 +207,10 @@ pub struct Move {
 pub fn move_and_slide(world: &World, mut pos: Vec3, delta: Vec3) -> Move {
     match overlap(world, pos) {
         Overlap::None => {}
+        // Not an assertion: the host checks placements against poses up to a round trip
+        // old, so a player who steps into the block somebody is placing gets here through
+        // no fault of anyone's code. Recovering beats crashing whoever it happened to.
         Overlap::Solid => {
-            debug_assert!(false, "move_and_slide started inside a block at {pos}");
             return Move {
                 pos: push_out(world, pos),
                 blocked: BVec3::TRUE,

@@ -353,8 +353,18 @@ fn within_reach(actor: Vec3, pos: BlockPos) -> bool {
 ///
 /// This is what makes host-authoritative *real*: none of it is taken on the asker's
 /// word, so a modified client can ask for anything and still cannot break bedrock, reach
-/// across the map, overwrite a block that is already there, or wall a player in.
-fn edit_is_legal(world: &World, actor: Vec3, pos: BlockPos, block: Block) -> bool {
+/// across the map, overwrite a block that is already there, or wall anybody in.
+///
+/// `standing` is every player the host knows the position of, the actor included. A block
+/// placed inside somebody wedges *them*, so whose box it is does not matter — checking only
+/// the placer's own box left "build into the person next to you" wide open.
+fn edit_is_legal(
+    world: &World,
+    actor: Vec3,
+    standing: &[Vec3],
+    pos: BlockPos,
+    block: Block,
+) -> bool {
     if !within_reach(actor, pos) {
         return false;
     }
@@ -362,8 +372,12 @@ fn edit_is_legal(world: &World, actor: Vec3, pos: BlockPos, block: Block) -> boo
         // Breaking. Bedrock is the floor of the world; breaking it drops you out of it.
         Block::Air => world.block(pos) != Block::Bedrock,
         // Placing: only a voxel some item actually places, only into empty space, and
-        // never inside the player doing it.
-        _ => block.placeable() && world.block(pos) == Block::Air && !player::would_trap(actor, pos),
+        // never inside a player.
+        _ => {
+            block.placeable()
+                && world.block(pos) == Block::Air
+                && !standing.iter().any(|p| player::would_trap(*p, pos))
+        }
     }
 }
 
@@ -373,10 +387,11 @@ fn apply_if_legal(
     sim: &mut World,
     chunks: &mut Chunks,
     actor: Vec3,
+    standing: &[Vec3],
     pos: BlockPos,
     block: Block,
 ) -> bool {
-    if !edit_is_legal(sim, actor, pos, block) || !sim.set_block(pos, block) {
+    if !edit_is_legal(sim, actor, standing, pos, block) || !sim.set_block(pos, block) {
         return false;
     }
     mark_dirty(chunks, pos);
@@ -402,10 +417,17 @@ enum Edit {
 /// The host is authoritative: it checks every request against [`edit_is_legal`], applies
 /// it, and announces it. A peer only asks — it does not touch its own world, so what it
 /// sees is always what the host said, never a local guess that has to be rolled back.
-fn submit_edit(role: Role, session: &Session, sim: &mut World, chunks: &mut Chunks, edit: Edit) {
+fn submit_edit(
+    role: Role,
+    session: &Session,
+    sim: &mut World,
+    chunks: &mut Chunks,
+    standing: &[Vec3],
+    edit: Edit,
+) {
     match (role, edit) {
         (Role::Host, Edit::Request { actor, pos, block }) => {
-            if apply_if_legal(sim, chunks, actor, pos, block) {
+            if apply_if_legal(sim, chunks, actor, standing, pos, block) {
                 session.send(Target::All, Msg::Edit { pos, block });
             }
         }
@@ -451,6 +473,7 @@ fn target_and_edit(
     me: Res<Me>,
     role: Res<NetRole>,
     held: Res<Held>,
+    peers: Res<Peers>,
     session: NonSend<Session>,
     mut sim: ResMut<Sim>,
     mut chunks: ResMut<Chunks>,
@@ -486,8 +509,24 @@ fn target_and_edit(
             pos,
             block,
         };
-        submit_edit(role.0, &session, &mut sim.0, &mut chunks, request);
+        let standing = standing(&me.0, &peers);
+        submit_edit(
+            role.0,
+            &session,
+            &mut sim.0,
+            &mut chunks,
+            &standing,
+            request,
+        );
     }
+}
+
+/// Where everybody is: this player, plus the last pose each peer sent. What the placement
+/// rules must not put a block inside of.
+fn standing(me: &Player, peers: &Peers) -> Vec<Vec3> {
+    std::iter::once(me.pos)
+        .chain(peers.0.values().map(|p| p.pos))
+        .collect()
 }
 
 /// Is `from` entitled to say this? The whole trust boundary, in one pure function.
@@ -511,6 +550,7 @@ fn authorized(role: Role, from: PlayerId, msg: &Msg) -> bool {
 fn net_receive(
     role: Res<NetRole>,
     time: Res<Time>,
+    my_player: Res<Me>,
     mut session: NonSendMut<Session>,
     mut sim: ResMut<Sim>,
     mut chunks: ResMut<Chunks>,
@@ -580,7 +620,8 @@ fn net_receive(
                             // is the truth.
                             Role::Peer { .. } => Edit::Announcement { pos, block },
                         };
-                        submit_edit(role.0, &session, &mut sim.0, &mut chunks, edit);
+                        let standing = standing(&my_player.0, &peers);
+                        submit_edit(role.0, &session, &mut sim.0, &mut chunks, &standing, edit);
                     }
                     Msg::Pose { id, pose } => {
                         // The host is the only relay.
@@ -937,6 +978,18 @@ mod tests {
     }
 
     /// A world with one chunk loaded, plus a spot to stand and the block under it.
+    /// The host's rule check with nobody else in the world — the single-player case, and
+    /// the one most of these tests are about.
+    fn apply_alone(
+        world: &mut World,
+        chunks: &mut Chunks,
+        actor: Vec3,
+        pos: BlockPos,
+        block: Block,
+    ) -> bool {
+        apply_if_legal(world, chunks, actor, &[actor], pos, block)
+    }
+
     fn standing_in_a_loaded_world() -> (World, Chunks, Vec3, BlockPos) {
         let mut world = World::new(4, []);
         world.load_chunk(ChunkPos::new(0, 0));
@@ -956,7 +1009,7 @@ mod tests {
 
         // Standing on the bedrock, so reach cannot be what refuses this.
         let feet = Vec3::new(8.5, 1.0, 8.5);
-        assert!(!apply_if_legal(
+        assert!(!apply_alone(
             &mut world,
             &mut chunks,
             feet,
@@ -969,7 +1022,7 @@ mod tests {
         // ... and placing bedrock is refused too: no item places it.
         let air = BlockPos::new(7, surface.y + 1, 8);
         assert_eq!(world.block(air), Block::Air);
-        assert!(!apply_if_legal(
+        assert!(!apply_alone(
             &mut world,
             &mut chunks,
             surface_feet,
@@ -979,10 +1032,39 @@ mod tests {
         assert_eq!(world.block(air), Block::Air);
     }
 
+    /// Nobody may be walled in — not just the person placing the block. Checking only the
+    /// placer's own box left "build into the player standing next to you" open, and a
+    /// player inside a block cannot walk out of it or break their way out.
+    #[test]
+    fn a_block_may_not_be_placed_inside_another_player() {
+        let (mut world, mut chunks, feet, surface) = standing_in_a_loaded_world();
+        // Somebody else standing one block over, within our reach.
+        let them = Vec3::new(7.5, surface.y as f32 + 1.0, 8.5);
+        let their_head = BlockPos::new(7, surface.y + 2, 8);
+        assert!(player::would_trap(them, their_head));
+
+        assert!(
+            !apply_if_legal(
+                &mut world,
+                &mut chunks,
+                feet,
+                &[feet, them],
+                their_head,
+                Block::Stone
+            ),
+            "placed a block inside somebody"
+        );
+        assert_eq!(world.block(their_head), Block::Air);
+        assert!(
+            apply_alone(&mut world, &mut chunks, feet, their_head, Block::Stone),
+            "with nobody there it is an ordinary place"
+        );
+    }
+
     #[test]
     fn the_host_applies_a_legal_edit() {
         let (mut world, mut chunks, feet, surface) = standing_in_a_loaded_world();
-        assert!(apply_if_legal(
+        assert!(apply_alone(
             &mut world,
             &mut chunks,
             feet,
@@ -1000,13 +1082,7 @@ mod tests {
         let far = BlockPos::new(0, world.ground_height(0, 0), 0);
         assert!(world.solid(far), "the test needs a real block over there");
         assert!(!within_reach(feet, far));
-        assert!(!apply_if_legal(
-            &mut world,
-            &mut chunks,
-            feet,
-            far,
-            Block::Air
-        ));
+        assert!(!apply_alone(&mut world, &mut chunks, feet, far, Block::Air));
         assert!(world.solid(far), "an unreachable block is untouched");
     }
 
@@ -1014,20 +1090,20 @@ mod tests {
     fn a_block_may_only_be_placed_into_empty_space() {
         let (mut world, mut chunks, feet, surface) = standing_in_a_loaded_world();
         assert!(
-            !apply_if_legal(&mut world, &mut chunks, feet, surface, Block::Stone),
+            !apply_alone(&mut world, &mut chunks, feet, surface, Block::Stone),
             "the ground is already occupied"
         );
         assert_ne!(world.block(surface), Block::Stone);
 
         let inside_me = BlockPos::containing(feet);
         assert!(
-            !apply_if_legal(&mut world, &mut chunks, feet, inside_me, Block::Stone),
+            !apply_alone(&mut world, &mut chunks, feet, inside_me, Block::Stone),
             "nobody may be walled into the world"
         );
 
         let beside_me = BlockPos::new(7, surface.y + 1, 8);
         assert_eq!(world.block(beside_me), Block::Air);
-        assert!(apply_if_legal(
+        assert!(apply_alone(
             &mut world,
             &mut chunks,
             feet,
