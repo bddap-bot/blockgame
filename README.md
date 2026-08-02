@@ -37,7 +37,7 @@ joining player ignores their own seed and gets the host's world.
 | sprint         | `Shift`          | `R1`                 |
 | sink (flying)  | `Ctrl`           | `L1`                 |
 | fly on/off     | `F`              | `Y`                  |
-| break block    | left click       | `R2`                 |
+| swing / fire   | hold left click  | hold `R2`            |
 | place block    | right click      | `L2`                 |
 | hotbar         | `1`–`9`, `Q`/`E` | d-pad                |
 | craft          | `C`              | `X`                  |
@@ -45,6 +45,17 @@ joining player ignores their own seed and gets the host's world.
 
 You start in the air, flying, with nothing. Press `F` to drop into walking, then break
 something — it is yours.
+
+## Tools and guns
+
+Breaking a block takes a moment, and what is in your hand is how long it takes. A bare
+hand is half a second; a **hammer** is quicker and a **drill** is quicker still, both swung
+at arm's length. The **handgun** and the **rifle** break blocks at a distance instead —
+there is nothing else in the world to shoot at, and the rifle reaches furthest and scopes
+in while you hold the trigger. A **nail** is a crafting part and does nothing on its own.
+
+Each of those is three numbers on one row of the registry — how far, how fast, how much it
+zooms — so the game has one code path through all of them, and a new tool is a new row.
 
 ## Making things
 

@@ -408,7 +408,9 @@ fn within_reach(actor: Vec3, pos: BlockPos, reach: f32) -> bool {
 /// placed inside somebody wedges *them*, so whose box it is does not matter — checking only
 /// the placer's own box left "build into the person next to you" wide open.
 ///
-/// `reach` is how far this player's own things let them work — see [`Inventory::reach`].
+/// `reach` is how far this player's own things let them *break* — see [`Inventory::reach`].
+/// Building is always arm's length, whatever they own: a gun knocks the top off the next
+/// hill, and there is nothing it could mean to build one from here.
 fn edit_is_legal(
     world: &World,
     actor: Vec3,
@@ -417,16 +419,14 @@ fn edit_is_legal(
     block: Block,
     reach: f32,
 ) -> bool {
-    if !within_reach(actor, pos, reach) {
-        return false;
-    }
     match block {
         // Breaking. Bedrock is the floor of the world; breaking it drops you out of it.
-        Block::Air => world.block(pos) != Block::Bedrock,
+        Block::Air => within_reach(actor, pos, reach) && world.block(pos) != Block::Bedrock,
         // Placing: only a voxel some item actually places, only into empty space, and
         // never inside a player.
         _ => {
-            block.placeable()
+            within_reach(actor, pos, Use::BARE_HAND.reach)
+                && block.placeable()
                 && world.block(pos) == Block::Air
                 && !standing.iter().any(|p| player::would_trap(*p, pos))
         }
@@ -1431,6 +1431,21 @@ mod tests {
         assert!(
             break_it(&mut world, &mut chunks, &mut armed),
             "a rifle does"
+        );
+        assert_eq!(world.block(far), Block::Air);
+
+        // ... and the range it buys is for knocking blocks down, not putting them up.
+        assert!(
+            !apply_if_legal(
+                &mut world,
+                &mut chunks,
+                &mut armed,
+                feet,
+                &[feet],
+                far,
+                Block::Stone
+            ),
+            "built a wall on the next hill with a rifle"
         );
         assert_eq!(world.block(far), Block::Air);
     }
