@@ -5,7 +5,7 @@
 //! authority, so there is exactly one edit message in the codebase rather than a
 //! request/response pair that can drift apart.
 
-use crate::registry::Block;
+use crate::registry::{Block, Item};
 use crate::world::{BLOCKS_PER_CHUNK, BlockPos};
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
@@ -14,13 +14,23 @@ use serde::{Deserialize, Serialize};
 /// join ticket.
 pub type PlayerId = iroh::EndpointId;
 
-/// Where a player is and which way they are facing. Sent continuously, over unreliable
-/// datagrams — a lost pose is superseded by the next one a frame later.
+/// Where a player is, which way they are facing, and what is in their hand. Sent
+/// continuously, over unreliable datagrams — a lost pose is superseded by the next one a
+/// frame later.
+///
+/// The held item rides here rather than in a message of its own precisely because this
+/// stream is continuous and loss-tolerant: it is the same kind of fact — how a player
+/// looks right now — and a dedicated message would need change-detection and a resend to
+/// say the same thing less reliably.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Pose {
     pub pos: [f32; 3],
     pub yaw: f32,
     pub pitch: f32,
+    /// What they are holding, or `None` for an empty hand — which is what a player with
+    /// none of the item they have selected has. Cosmetic: the host checks what an edit
+    /// costs against the inventory it keeps, never against this.
+    pub held: Option<Item>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -48,6 +58,16 @@ pub enum Msg {
     Pose { id: PlayerId, pose: Pose },
     /// Host → peer: somebody disconnected, drop their avatar.
     PeerLeft { id: PlayerId },
+    /// Peer → host: "make me one of these". The host owns every inventory, so a craft is
+    /// asked for exactly as an edit is, and answered with an [`Msg::Inventory`].
+    Craft { item: Item },
+    /// Host → peer: your things, in full.
+    ///
+    /// Absolute rather than a delta, and sent only to its owner. Absolute because a lost
+    /// or reordered delta leaves a player's pile permanently wrong; only to its owner
+    /// because nobody else's game reads it — what other players see of your hand is the
+    /// held item on your [`Pose`].
+    Inventory { items: Vec<(Item, u32)> },
 }
 
 impl Msg {
@@ -72,10 +92,11 @@ pub const MAX_FRAME_LEN: usize = 1024 * 1024;
 const _: () = assert!(BLOCKS_PER_CHUNK * EDIT_LEN + 64 <= MAX_FRAME_LEN);
 
 /// Datagram payloads must fit QUIC's guaranteed minimum datagram size, which is a little
-/// over a kilobyte before path-MTU discovery grows it. Every datagram-class message is
-/// fixed-size, so `datagram_messages_fit` can check the whole class by encoding one of
-/// each — which is what lets the sender pick a transport from the message alone, with no
-/// runtime size check and no silent fallback to the reliable path.
+/// over a kilobyte before path-MTU discovery grows it. The datagram class is [`Msg::Pose`]
+/// alone, and a pose varies only over what is in the hand — a list `every_pose` can
+/// enumerate — so `datagram_messages_fit` checks the whole class exhaustively rather than
+/// sampling it. That is what lets the sender pick a transport from the message alone, with
+/// no runtime size check and no silent fallback to the reliable path.
 pub const MAX_DATAGRAM_LEN: usize = 1024;
 
 /// Bytes of length prefix in front of every stream frame.
@@ -142,6 +163,7 @@ mod tests {
             pos: [1.5, 2.5, -3.5],
             yaw: 0.25,
             pitch: -0.5,
+            held: Some(Item::Hammer),
         }
     }
 
@@ -161,6 +183,10 @@ mod tests {
             },
             Msg::Pose { id, pose: pose() },
             Msg::PeerLeft { id },
+            Msg::Craft { item: Item::Car },
+            Msg::Inventory {
+                items: vec![(Item::Nail, 8), (Item::Wood, 6)],
+            },
         ];
         for m in &all {
             match m {
@@ -169,10 +195,27 @@ mod tests {
                 | Msg::WorldPart { .. }
                 | Msg::Edit { .. }
                 | Msg::Pose { .. }
-                | Msg::PeerLeft { .. } => {}
+                | Msg::PeerLeft { .. }
+                | Msg::Craft { .. }
+                | Msg::Inventory { .. } => {}
             }
         }
         all
+    }
+
+    /// Every pose a player can send: one per thing they could be holding, plus an empty
+    /// hand. The held item is the only part of a pose that varies in size, and it varies
+    /// over a list this file can enumerate — which is what keeps the datagram bound below
+    /// a fact about the protocol rather than a sample of one.
+    fn every_pose() -> Vec<Msg> {
+        let id = some_id();
+        std::iter::once(None)
+            .chain(Item::ALL.iter().copied().map(Some))
+            .map(|held| Msg::Pose {
+                id,
+                pose: Pose { held, ..pose() },
+            })
+            .collect()
     }
 
     #[test]
@@ -184,18 +227,25 @@ mod tests {
     }
 
     /// The guarantee that lets the sender pick a transport from the message alone, with no
-    /// runtime size check and no silent fallback to the reliable path. Every datagram-class
-    /// message is fixed-size, so one of each is the whole class.
+    /// runtime size check and no silent fallback to the reliable path.
     #[test]
     fn datagram_messages_fit() {
         let datagrams: Vec<Msg> = one_of_each()
             .into_iter()
+            .chain(every_pose())
             .filter(Msg::via_datagram)
             .collect();
         assert!(!datagrams.is_empty(), "poses ride datagrams");
         for m in datagrams {
             let n = encode(&m).unwrap().len();
             assert!(n <= MAX_DATAGRAM_LEN, "{m:?} encodes to {n} bytes");
+        }
+    }
+
+    #[test]
+    fn a_pose_round_trips_whatever_is_in_the_hand() {
+        for m in every_pose() {
+            assert_eq!(decode(&encode(&m).unwrap()).unwrap(), m);
         }
     }
 
@@ -256,7 +306,7 @@ mod tests {
         );
         // One past the last block this build knows: the off-by-one a newer peer would
         // send. Blocks are append-only, so the last variant declared is the highest id.
-        bytes[id] = Block::Bedrock as u8 + 1;
+        bytes[id] = Block::Cushion as u8 + 1;
         assert!(decode(&bytes).is_err());
     }
 

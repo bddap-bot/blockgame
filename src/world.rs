@@ -628,8 +628,7 @@ mod tests {
                 // A tree may sit above the surface, never below it.
                 assert!(
                     matches!(surface, Block::Grass | Block::Sand),
-                    "surface at ({lx},{lz}) is {}",
-                    surface.name()
+                    "surface at ({lx},{lz}) is {surface:?}"
                 );
                 assert!(w.solid(BlockPos::new(lx, h - 1, lz)));
                 assert_eq!(w.block(BlockPos::new(lx, h - 6, lz)), Block::Stone);

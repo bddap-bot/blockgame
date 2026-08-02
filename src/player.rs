@@ -8,7 +8,7 @@
 
 use crate::world::{BlockPos, WORLD_HEIGHT, World};
 use bevy::math::{BVec3, Vec3};
-use bevy::prelude::{Component, Resource};
+use bevy::prelude::Component;
 
 /// Half the player's width and depth, in blocks.
 pub const HALF_WIDTH: f32 = 0.3;
@@ -104,18 +104,6 @@ impl Player {
     pub fn move_basis(&self) -> (Vec3, Vec3) {
         let (sy, cy) = self.yaw.sin_cos();
         (Vec3::new(-sy, 0.0, -cy), Vec3::new(cy, 0.0, -sy))
-    }
-}
-
-/// Which hotbar slot the local player is holding. Separate from [`Player`] because it is
-/// the seam the item registry grows into; which slot the controls select is
-/// `game::apply_intent`'s call, not this type's.
-#[derive(Resource, Debug, Clone, Copy)]
-pub struct Held(pub crate::registry::Item);
-
-impl Default for Held {
-    fn default() -> Self {
-        Held(crate::registry::Item::from_slot(0))
     }
 }
 

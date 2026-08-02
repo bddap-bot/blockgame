@@ -2,20 +2,22 @@
 //! joining.
 //!
 //! [`Role`] is consulted only where authority differs: [`authorized`] (whose word counts),
-//! [`submit_edit`] (who may change the world), [`net_receive`] (who relays), [`run`] and
-//! [`update_status`] (which of the two the player is told they are). Everything else is
-//! role-blind, which is what "single player is multiplayer with zero peers" has to mean if
-//! it is going to stay true.
+//! [`submit_edit`] and [`craft_on_request`] (who may change the world and who may spend a
+//! pile), [`net_receive`] (who relays), and [`run`] (which of the two the player is told
+//! they are). Everything else is role-blind, which is what "single player is multiplayer
+//! with zero peers" has to mean if it is going to stay true.
 
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use std::collections::{HashMap, HashSet};
 
 use crate::avatar;
+use crate::hud;
 use crate::input::{Intent, PITCH_LIMIT, gather_intent};
+use crate::inventory::{Held, Inventories, Inventory};
 use crate::mesh::{ChunkMesh, build_chunk_mesh};
 use crate::net::{Boot, Event, Msg, PlayerId, Pose, Role, Session, Target};
-use crate::player::{self, Held, Motion, Player};
+use crate::player::{self, Motion, Player};
 use crate::raycast;
 use crate::registry::{Block, Item};
 use crate::world::{BlockPos, CHUNK_SIZE, ChunkPos, World};
@@ -44,10 +46,10 @@ const SKY: Color = Color::srgb(0.52, 0.72, 0.95);
 struct Sim(World);
 
 #[derive(Resource)]
-struct Me(Player);
+pub struct Me(pub Player);
 
 #[derive(Resource, Clone, Copy)]
-struct NetRole(Role);
+pub struct NetRole(pub Role);
 
 /// Chunk entities by position. An entry with no `Mesh3d` is a chunk that meshed to
 /// nothing (all air) — still tracked, so it isn't re-meshed every frame.
@@ -63,13 +65,16 @@ struct WorldMaterial(Handle<StandardMaterial>);
 /// Everyone else in this world. Their position is game state, not just something to draw:
 /// the host checks each peer's edits against where that peer last said it was.
 #[derive(Resource, Default)]
-struct Peers(HashMap<PlayerId, PeerState>);
+pub struct Peers(pub HashMap<PlayerId, PeerState>);
 
-struct PeerState {
+pub struct PeerState {
     /// Feet position from this player's most recent believed [`Msg::Pose`].
     pos: Vec3,
     /// The model drawing them.
-    avatar: Entity,
+    body: avatar::Body,
+    /// What their model is currently shown holding. Kept so a pose that says the same
+    /// thing again — sixty a second of them — costs nothing.
+    held: Option<Item>,
     /// What this player is still allowed to change.
     budget: Budget,
     /// How far this player may still claim to have moved. A pose is a claim, and every
@@ -152,9 +157,6 @@ struct ChunkTag;
 #[derive(Component)]
 struct Highlight;
 
-#[derive(Component)]
-struct StatusText;
-
 /// Builds and runs the game. Returns when the window closes.
 pub fn run(boot: Boot) -> anyhow::Result<()> {
     let Boot {
@@ -191,10 +193,11 @@ pub fn run(boot: Boot) -> anyhow::Result<()> {
     .init_resource::<Held>()
     .init_resource::<Chunks>()
     .init_resource::<Peers>()
+    .init_resource::<Inventories>()
     .init_resource::<Welcomed>()
     .init_resource::<WorldBudget>()
     .insert_non_send_resource(session)
-    .add_systems(Startup, setup)
+    .add_systems(Startup, (setup, hud::setup))
     .add_systems(
         Update,
         (
@@ -202,10 +205,12 @@ pub fn run(boot: Boot) -> anyhow::Result<()> {
             apply_intent,
             net_receive,
             target_and_edit,
+            craft_on_request,
             stream_chunks,
             remesh_dirty,
             net_send_pose,
-            update_status,
+            hud::update_status,
+            hud::update_hotbar,
             quit_on_request,
         )
             .chain(),
@@ -277,42 +282,6 @@ fn setup(
         Visibility::Hidden,
     ));
 
-    // Crosshair. Sized for the Deck's 1280x800 panel, where a 1px reticle disappears.
-    commands
-        .spawn(Node {
-            width: Val::Percent(100.0),
-            height: Val::Percent(100.0),
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            ..default()
-        })
-        .with_children(|ui| {
-            ui.spawn((
-                Text::new("+"),
-                TextFont {
-                    font_size: 30.0,
-                    ..default()
-                },
-                TextColor(Color::WHITE),
-            ));
-        });
-
-    commands.spawn((
-        StatusText,
-        Text::new(""),
-        TextFont {
-            font_size: 22.0,
-            ..default()
-        },
-        TextColor(Color::WHITE),
-        Node {
-            position_type: PositionType::Absolute,
-            left: Val::Px(16.0),
-            bottom: Val::Px(16.0),
-            ..default()
-        },
-    ));
-
     if let Ok(mut c) = cursor.single_mut() {
         c.grab_mode = CursorGrabMode::Locked;
         c.visible = false;
@@ -369,13 +338,14 @@ fn apply_intent(
         *grounded = moved.grounded;
     }
 
-    if let Some(slot) = intent.item_pick {
-        held.0 = Item::from_slot(slot);
+    // The number row reaches the first nine cells; stepping reaches every cell. A key
+    // pointed past the end of the hotbar does nothing rather than wrapping round to
+    // something the player was not aiming at.
+    if let Some(cell) = intent.item_pick.and_then(|slot| Item::ALL.get(slot)) {
+        held.0 = *cell;
     }
     if intent.item_delta != 0 {
-        let n = Item::count() as i32;
-        let slot = (held.0.slot() as i32 + intent.item_delta).rem_euclid(n);
-        held.0 = Item::from_slot(slot as usize);
+        held.0 = held.0.step(intent.item_delta);
     }
 
     if let Ok(mut t) = camera.single_mut() {
@@ -427,9 +397,14 @@ fn edit_is_legal(
 
 /// The host's half of an edit: apply a request if the rules allow it, and say whether
 /// the world changed — which is exactly when the host announces it.
+///
+/// This is also where a block becomes a thing you own and back again. Placing spends the
+/// item; breaking gathers whatever was standing there. One function, so the world and the
+/// player's pile cannot end up disagreeing about an edit that half happened.
 fn apply_if_legal(
     sim: &mut World,
     chunks: &mut Chunks,
+    inventory: &mut Inventory,
     actor: Vec3,
     standing: &[Vec3],
     pos: BlockPos,
@@ -441,19 +416,56 @@ fn apply_if_legal(
     // asked about rather than deciding blind. `stream_chunks` drops it again on its next
     // pass if nobody is near it.
     sim.load_chunk(pos.chunk());
-    if !edit_is_legal(sim, actor, standing, pos, block) || !sim.set_block(pos, block) {
+    if !edit_is_legal(sim, actor, standing, pos, block) {
         return false;
+    }
+    // What this costs and what it yields, both decided before the world moves: `set_block`
+    // can still refuse an out-of-bounds write, and a pile paid out of for an edit that
+    // never happened is exactly the sort of thing nobody notices until a chest is empty.
+    let spend = Item::placing(block);
+    if let Some(item) = spend
+        && inventory.count(item) == 0
+    {
+        return false;
+    }
+    let gathered = Item::placing(sim.block(pos));
+    if !sim.set_block(pos, block) {
+        return false;
+    }
+    match spend {
+        Some(item) => {
+            let paid = inventory.take(item, 1);
+            debug_assert!(paid, "the count was checked a moment ago");
+        }
+        // Breaking. Bedrock is unbreakable and air was never there, so an unowned block
+        // simply yields nothing.
+        None => {
+            if let Some(item) = gathered {
+                inventory.add(item, 1);
+            }
+        }
     }
     mark_dirty(chunks, pos);
     true
 }
 
+/// Whoever is asking for something: who they are, and where they say they are.
+///
+/// The two travel together because every rule reads both — reach is checked against the
+/// position, and the cost is taken out of the pile belonging to the id. Splitting them
+/// into two arguments is how an edit gets checked against one player and paid for by
+/// another.
+#[derive(Clone, Copy)]
+struct Actor {
+    id: PlayerId,
+    pos: Vec3,
+}
+
 /// A block change on its way into the world.
 enum Edit {
-    /// Somebody wants this change — the local player, or a peer over the wire. `actor` is
-    /// that player's feet, and every rule is checked against it.
+    /// Somebody wants this change — the local player, or a peer over the wire.
     Request {
-        actor: Vec3,
+        actor: Actor,
         pos: BlockPos,
         block: Block,
     },
@@ -465,20 +477,25 @@ enum Edit {
 /// The ONE place a block change enters the game, from local input or from the wire.
 ///
 /// The host is authoritative: it checks every request against [`edit_is_legal`], applies
-/// it, and announces it. A peer only asks — it does not touch its own world, so what it
-/// sees is always what the host said, never a local guess that has to be rolled back.
+/// it, announces it, and tells the actor what they have left. A peer only asks — it does
+/// not touch its own world or its own pile, so what it sees is always what the host said,
+/// never a local guess that has to be rolled back.
+#[allow(clippy::too_many_arguments)]
 fn submit_edit(
     role: Role,
     session: &Session,
     sim: &mut World,
     chunks: &mut Chunks,
+    inventories: &mut Inventories,
     standing: &[Vec3],
     edit: Edit,
 ) {
     match (role, edit) {
         (Role::Host, Edit::Request { actor, pos, block }) => {
-            if apply_if_legal(sim, chunks, actor, standing, pos, block) {
+            let inventory = inventories.0.entry(actor.id).or_default();
+            if apply_if_legal(sim, chunks, inventory, actor.pos, standing, pos, block) {
                 session.send(Target::All, Msg::Edit { pos, block });
+                announce_inventory(session, actor.id, inventory);
             }
         }
         (Role::Peer { .. }, Edit::Request { pos, block, .. }) => {
@@ -494,6 +511,31 @@ fn submit_edit(
         (Role::Host, Edit::Announcement { .. }) => {
             unreachable!("the host is the only announcer")
         }
+    }
+}
+
+/// Tells one player what they now have. Host-side only, and only ever to the owner.
+///
+/// The host's own pile needs no message: it is already the map this reads from, which is
+/// what keeps single player from being a second path through the inventory.
+fn announce_inventory(session: &Session, who: PlayerId, inventory: &Inventory) {
+    if who != session.me() {
+        session.send(
+            Target::One(who),
+            Msg::Inventory {
+                items: inventory.contents(),
+            },
+        );
+    }
+}
+
+/// The host's half of a craft: pay the recipe out of that player's pile and hand them the
+/// thing. Every rule lives in [`Inventory::craft`], so a modified client asking for a free
+/// car gets what an honest one would — nothing, unless the nails are there.
+fn submit_craft(session: &Session, inventories: &mut Inventories, who: PlayerId, item: Item) {
+    let inventory = inventories.0.entry(who).or_default();
+    if inventory.craft(item) {
+        announce_inventory(session, who, inventory);
     }
 }
 
@@ -527,6 +569,7 @@ fn target_and_edit(
     session: NonSend<Session>,
     mut sim: ResMut<Sim>,
     mut chunks: ResMut<Chunks>,
+    mut inventories: ResMut<Inventories>,
     mut highlight: Query<(&mut Transform, &mut Visibility), With<Highlight>>,
 ) {
     let hit = raycast::cast(&sim.0, me.0.eye(), me.0.look_dir(), REACH);
@@ -548,14 +591,19 @@ fn target_and_edit(
     let edit = if intent.break_block {
         Some((hit.block, Block::Air))
     } else if intent.place_block {
-        Some((hit.adjacent(), held.0.places()))
+        // Holding something that is not a block places nothing: a rifle has no behaviour
+        // yet, and pretending the button is broken is better than pretending it is a rifle.
+        held.0.places().map(|block| (hit.adjacent(), block))
     } else {
         None
     };
 
     if let Some((pos, block)) = edit {
         let request = Edit::Request {
-            actor: me.0.pos,
+            actor: Actor {
+                id: session.me(),
+                pos: me.0.pos,
+            },
             pos,
             block,
         };
@@ -565,9 +613,28 @@ fn target_and_edit(
             &session,
             &mut sim.0,
             &mut chunks,
+            &mut inventories,
             &standing,
             request,
         );
+    }
+}
+
+/// The local player's craft button. Like an edit, it is a *request*: the host owns every
+/// pile, so a peer asks and waits to be told what it has.
+fn craft_on_request(
+    intent: Res<Intent>,
+    held: Res<Held>,
+    role: Res<NetRole>,
+    session: NonSend<Session>,
+    mut inventories: ResMut<Inventories>,
+) {
+    if !intent.craft {
+        return;
+    }
+    match role.0 {
+        Role::Host => submit_craft(&session, &mut inventories, session.me(), held.0),
+        Role::Peer { .. } => session.send(Target::All, Msg::Craft { item: held.0 }),
     }
 }
 
@@ -583,15 +650,33 @@ fn standing(me: &Player, peers: &Peers) -> Vec<Vec3> {
 ///
 /// A peer has exactly one link — to the host — so it believes that endpoint and nobody
 /// else. The host talks to many peers, and a peer may only ever speak for itself: ask for
-/// an edit, report its own pose, say hello. Everything else is the host's word, and a
-/// peer sending one is claiming to be the host.
+/// an edit or a craft, report its own pose, say hello. Everything else is the host's word,
+/// and a peer sending one is claiming to be the host.
+///
+/// Both halves are exhaustive on purpose. A request is not a thing a host says, any more
+/// than an announcement is a thing a peer says, and a new message has to declare which it
+/// is here before it can be acted on anywhere.
 fn authorized(role: Role, from: PlayerId, msg: &Msg) -> bool {
     match role {
-        Role::Peer { host } => from == host,
+        Role::Peer { host } => {
+            from == host
+                && match msg {
+                    Msg::Welcome { .. }
+                    | Msg::WorldPart { .. }
+                    | Msg::Edit { .. }
+                    | Msg::Pose { .. }
+                    | Msg::PeerLeft { .. }
+                    | Msg::Inventory { .. } => true,
+                    Msg::Hello | Msg::Craft { .. } => false,
+                }
+        }
         Role::Host => match msg {
-            Msg::Welcome { .. } | Msg::WorldPart { .. } | Msg::PeerLeft { .. } => false,
+            Msg::Welcome { .. }
+            | Msg::WorldPart { .. }
+            | Msg::PeerLeft { .. }
+            | Msg::Inventory { .. } => false,
             Msg::Pose { id, .. } => *id == from,
-            Msg::Hello | Msg::Edit { .. } => true,
+            Msg::Hello | Msg::Edit { .. } | Msg::Craft { .. } => true,
         },
     }
 }
@@ -605,6 +690,7 @@ fn net_receive(
     mut sim: ResMut<Sim>,
     mut chunks: ResMut<Chunks>,
     mut peers: ResMut<Peers>,
+    mut inventories: ResMut<Inventories>,
     mut welcomed: ResMut<Welcomed>,
     mut world_budget: ResMut<WorldBudget>,
     palette: Res<avatar::Palette>,
@@ -670,7 +756,10 @@ fn net_receive(
                                     continue;
                                 }
                                 Edit::Request {
-                                    actor: peer.pos,
+                                    actor: Actor {
+                                        id: from,
+                                        pos: peer.pos,
+                                    },
                                     pos,
                                     block,
                                 }
@@ -680,7 +769,32 @@ fn net_receive(
                             Role::Peer { .. } => Edit::Announcement { pos, block },
                         };
                         let standing = standing(&my_player.0, &peers);
-                        submit_edit(role.0, &session, &mut sim.0, &mut chunks, &standing, edit);
+                        submit_edit(
+                            role.0,
+                            &session,
+                            &mut sim.0,
+                            &mut chunks,
+                            &mut inventories,
+                            &standing,
+                            edit,
+                        );
+                    }
+                    // Asking the host to make something is asking it to do work on your
+                    // behalf, exactly as an edit is, so it comes out of the same
+                    // allowance — and from somebody it has heard of.
+                    Msg::Craft { item } => {
+                        if role.0 == Role::Host
+                            && let Some(peer) = peers.0.get_mut(&from)
+                            && peer.budget.spend(1.0)
+                        {
+                            submit_craft(&session, &mut inventories, from, item);
+                        }
+                    }
+                    // The host's word on what this player has. A peer keeps one pile —
+                    // its own — under its own id, so every reader asks the same question
+                    // whichever side it is on.
+                    Msg::Inventory { items } => {
+                        inventories.0.insert(me, Inventory::from_contents(items));
                     }
                     Msg::Pose { id, pose } => {
                         // The host is the only relay.
@@ -693,7 +807,7 @@ fn net_receive(
                     }
                     Msg::PeerLeft { id } => {
                         welcomed.0.remove(&id);
-                        forget_peer(&mut commands, &mut peers, id);
+                        forget_peer(&mut commands, &mut peers, &mut inventories, id);
                     }
                     // The handshake already happened in `net::boot`, so a second Welcome
                     // has nothing left to do.
@@ -704,7 +818,7 @@ fn net_receive(
                 Role::Host => {
                     session.send(Target::All, Msg::PeerLeft { id });
                     welcomed.0.remove(&id);
-                    forget_peer(&mut commands, &mut peers, id);
+                    forget_peer(&mut commands, &mut peers, &mut inventories, id);
                 }
                 // A peer only ever links to the host, but a departure that is not the
                 // host's must never end somebody's game.
@@ -745,15 +859,23 @@ fn track_peer(
                 return;
             }
             p.pos = pos;
-            commands.entity(p.avatar).insert(transform);
+            commands.entity(p.body.root).insert(transform);
+            // Only when it changes: a pose arrives every frame, and re-stating the same
+            // cube would be sixty component writes a second per player to no effect.
+            if p.held != pose.held {
+                p.held = pose.held;
+                avatar::show_held(commands, palette, p.body, pose.held);
+            }
         }
         None => {
-            let avatar = avatar::spawn(commands, palette, transform);
+            let body = avatar::spawn(commands, palette, transform);
+            avatar::show_held(commands, palette, body, pose.held);
             peers.0.insert(
                 id,
                 PeerState {
                     pos,
-                    avatar,
+                    body,
+                    held: pose.held,
                     budget: Budget::new(EDIT_RATE, EDIT_BURST),
                     travel: Budget::new(TRAVEL_RATE, TRAVEL_BURST),
                 },
@@ -762,13 +884,34 @@ fn track_peer(
     }
 }
 
-fn forget_peer(commands: &mut Commands, peers: &mut Peers, id: PlayerId) {
+/// Drops everything the game holds for a player who has gone: their model, and — on the
+/// host — their things.
+///
+/// Their things go because identities are free, and a pile kept for somebody who left is
+/// memory a stranger can grow by reconnecting under a new key. Nothing outlives the
+/// session anyway: the world itself is not saved either.
+fn forget_peer(
+    commands: &mut Commands,
+    peers: &mut Peers,
+    inventories: &mut Inventories,
+    id: PlayerId,
+) {
+    inventories.0.remove(&id);
     if let Some(p) = peers.0.remove(&id) {
-        commands.entity(p.avatar).despawn();
+        commands.entity(p.body.root).despawn();
     }
 }
 
-fn net_send_pose(session: NonSend<Session>, me: Res<Me>) {
+fn net_send_pose(
+    session: NonSend<Session>,
+    me: Res<Me>,
+    held: Res<Held>,
+    inventories: Res<Inventories>,
+) {
+    // An empty hand is what a player with none of the item they have *selected* has: the
+    // hotbar cursor may sit on a car you have not built yet, and showing everyone a car
+    // you do not own is a lie the network would happily carry.
+    let holding = Some(held.0).filter(|item| inventories.of(session.me()).count(*item) > 0);
     session.send(
         Target::All,
         Msg::Pose {
@@ -777,6 +920,7 @@ fn net_send_pose(session: NonSend<Session>, me: Res<Me>) {
                 pos: me.0.pos.into(),
                 yaw: me.0.yaw,
                 pitch: me.0.pitch,
+                held: holding,
             },
         },
     );
@@ -931,37 +1075,6 @@ fn refresh_chunk(
     true
 }
 
-fn update_status(
-    held: Res<Held>,
-    me: Res<Me>,
-    role: Res<NetRole>,
-    session: NonSend<Session>,
-    peers: Res<Peers>,
-    mut text: Query<&mut Text, With<StatusText>>,
-) {
-    let Ok(mut text) = text.single_mut() else {
-        return;
-    };
-    let mode = if me.0.is_flying() {
-        "flying"
-    } else {
-        "walking"
-    };
-    // The ticket gets its own line: 64 characters do not share a row with anything else
-    // on the Deck's 1280px panel.
-    let who = match role.0 {
-        Role::Host => format!("join ticket:  {}", session.ticket()),
-        Role::Peer { .. } => "in a friend's world".to_string(),
-    };
-    // ASCII only: bevy's built-in font has no glyph for a middle dot, and a missing glyph
-    // draws as a tofu box.
-    text.0 = format!(
-        "{mode}  |  holding {}  |  {} player(s)\n{who}",
-        held.0.name(),
-        peers.0.len() + 1,
-    );
-}
-
 fn quit_on_request(
     intent: Res<Intent>,
     mut exit: MessageWriter<AppExit>,
@@ -1049,7 +1162,16 @@ mod tests {
         iroh::SecretKey::from_bytes(&[n; 32]).public()
     }
 
-    /// A world with one chunk loaded, plus a spot to stand and the block under it.
+    /// A player with plenty of everything, so a test about the world's rules is not
+    /// quietly answered by an empty pocket.
+    fn stocked() -> Inventory {
+        let mut inv = Inventory::default();
+        for item in Item::ALL {
+            inv.add(*item, 64);
+        }
+        inv
+    }
+
     /// The host's rule check with nobody else in the world — the single-player case, and
     /// the one most of these tests are about.
     fn apply_alone(
@@ -1059,7 +1181,7 @@ mod tests {
         pos: BlockPos,
         block: Block,
     ) -> bool {
-        apply_if_legal(world, chunks, actor, &[actor], pos, block)
+        apply_if_legal(world, chunks, &mut stocked(), actor, &[actor], pos, block)
     }
 
     fn standing_in_a_loaded_world() -> (World, Chunks, Vec3, BlockPos) {
@@ -1119,6 +1241,7 @@ mod tests {
             !apply_if_legal(
                 &mut world,
                 &mut chunks,
+                &mut stocked(),
                 feet,
                 &[feet, them],
                 their_head,
@@ -1236,6 +1359,7 @@ mod tests {
                 pos: [0.0; 3],
                 yaw: 0.0,
                 pitch: 0.0,
+                held: None,
             },
         };
         assert!(!authorized(role, stranger, &pose), "not the host");
@@ -1256,6 +1380,7 @@ mod tests {
                 pos: [0.0; 3],
                 yaw: 0.0,
                 pitch: 0.0,
+                held: None,
             },
         };
         assert!(authorized(Role::Host, peer, &pose(peer)));
@@ -1346,6 +1471,123 @@ mod tests {
         assert!(
             !world.is_loaded(ChunkPos::new(0, 0)),
             "the chunk walked away from is gone"
+        );
+    }
+
+    /// The whole gathering loop, which is where every recipe's ingredients come from:
+    /// break a block, and the block is yours.
+    #[test]
+    fn breaking_a_block_puts_it_in_your_pocket() {
+        let (mut world, mut chunks, feet, surface) = standing_in_a_loaded_world();
+        let broken = world.block(surface);
+        let item = Item::placing(broken).expect("the surface is something you can hold");
+        let mut inventory = Inventory::default();
+
+        assert!(apply_if_legal(
+            &mut world,
+            &mut chunks,
+            &mut inventory,
+            feet,
+            &[feet],
+            surface,
+            Block::Air
+        ));
+        assert_eq!(
+            inventory.count(item),
+            1,
+            "broke a {broken:?} and got nothing"
+        );
+    }
+
+    /// Placing spends what you are holding, and an empty pocket is the end of it. Without
+    /// this the counts are decoration and crafting is pointless: why make a cushion when
+    /// you can place an infinite number of them?
+    #[test]
+    fn placing_spends_the_block_and_stops_when_it_runs_out() {
+        let (mut world, mut chunks, feet, surface) = standing_in_a_loaded_world();
+        let mut inventory = Inventory::default();
+        let beside_me = BlockPos::new(7, surface.y + 1, 8);
+        let above_me = BlockPos::new(7, surface.y + 2, 8);
+
+        assert!(
+            !apply_if_legal(
+                &mut world,
+                &mut chunks,
+                &mut inventory,
+                feet,
+                &[feet],
+                beside_me,
+                Block::Stone
+            ),
+            "placed a block out of an empty pocket"
+        );
+        assert_eq!(world.block(beside_me), Block::Air);
+
+        inventory.add(Item::Stone, 1);
+        assert!(apply_if_legal(
+            &mut world,
+            &mut chunks,
+            &mut inventory,
+            feet,
+            &[feet],
+            beside_me,
+            Block::Stone
+        ));
+        assert_eq!(
+            inventory.count(Item::Stone),
+            0,
+            "the block was not paid for"
+        );
+        assert!(!apply_if_legal(
+            &mut world,
+            &mut chunks,
+            &mut inventory,
+            feet,
+            &[feet],
+            above_me,
+            Block::Stone
+        ));
+        assert_eq!(world.block(above_me), Block::Air);
+    }
+
+    /// An edit the world refuses must cost nothing. The reach check is the sharpest case:
+    /// a player spraying blocks at a wall they cannot reach would otherwise empty their
+    /// pockets into thin air.
+    #[test]
+    fn a_refused_edit_is_free() {
+        let (mut world, mut chunks, feet, _) = standing_in_a_loaded_world();
+        let mut inventory = stocked();
+        let before = inventory.count(Item::Stone);
+        let far = BlockPos::new(0, world.ground_height(0, 0) + 4, 0);
+
+        assert!(!apply_if_legal(
+            &mut world,
+            &mut chunks,
+            &mut inventory,
+            feet,
+            &[feet],
+            far,
+            Block::Stone
+        ));
+        assert_eq!(inventory.count(Item::Stone), before, "charged for nothing");
+    }
+
+    /// A peer's pile is the host's to state, and a peer's craft is the host's to grant.
+    /// Either one going the wrong way is a client writing its own inventory.
+    #[test]
+    fn inventory_only_travels_from_the_host_and_crafts_only_towards_it() {
+        let (host, peer) = (id(5), id(6));
+        let full = Msg::Inventory {
+            items: vec![(Item::Car, 99)],
+        };
+        let craft = Msg::Craft { item: Item::Car };
+
+        assert!(!authorized(Role::Host, peer, &full), "peer stated a pile");
+        assert!(authorized(Role::Host, peer, &craft), "peers may ask");
+        assert!(authorized(Role::Peer { host }, host, &full));
+        assert!(
+            !authorized(Role::Peer { host }, host, &craft),
+            "a host does not ask a peer to make things"
         );
     }
 }

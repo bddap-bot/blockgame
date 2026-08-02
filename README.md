@@ -3,9 +3,8 @@
 A Minecraft-like voxel world in Rust, built to be extended. Bevy for rendering, iroh for
 multiplayer.
 
-These are the bones. There is no inventory, no crafting, no mobs, and no save file — just
-a world you can walk around, dig into, build in, and share with a friend. What gets added
-on top is `design/`'s business.
+Dig up blocks, make things out of them, build with a friend. No mobs and no save file yet.
+What gets added on top is `design/`'s business.
 
 ![a voxel world of hills, forest and beach](docs/screenshot.png)
 
@@ -40,10 +39,36 @@ joining player ignores their own seed and gets the host's world.
 | fly on/off     | `F`              | `Y`                  |
 | break block    | left click       | `R2`                 |
 | place block    | right click      | `L2`                 |
-| pick a block   | `1`–`6`          | d-pad left/right     |
+| hotbar         | `1`–`9`, `Q`/`E` | d-pad                |
+| craft          | `C`              | `X`                  |
 | quit           | `Esc`            | `Select` + `Start`   |
 
-You start in the air, flying. Press `F` to drop into walking.
+You start in the air, flying, with nothing. Press `F` to drop into walking, then break
+something — it is yours.
+
+## Making things
+
+You start empty-handed. Breaking a block puts it in your pocket; placing one spends it.
+
+The hotbar along the bottom is everything there is to hold, and it is also the crafting
+menu — there is no second screen and no grid to arrange. Walk the cursor onto a thing and
+the line above tells you what it is made of; press craft and, if you have the parts, you
+have one.
+
+|             | made of                    |
+|-------------|----------------------------|
+| nail        | 1 stone                    |
+| cushion     | 4 leaves + 1 wood          |
+| hammer      | 2 wood + 1 nail            |
+| handgun     | 1 wood + 2 nails           |
+| rifle       | 2 wood + 3 nails           |
+| drill       | 1 wood + 2 stone + 2 nails |
+| parachute   | 6 leaves + 2 nails         |
+| car         | 6 wood + 2 stone + 8 nails |
+
+The cushion is a block, so you can build with it. The rest you can make and carry —
+everyone else sees what is in your hand — but none of them *does* anything yet. That is
+the next job, one item at a time.
 
 ## Who you are
 
@@ -57,7 +82,9 @@ Everyone in the world is this spaceman, drawn from
 
 | file                | what it owns                                                    |
 |---------------------|-----------------------------------------------------------------|
-| `src/registry.rs`   | **every block in the game** — start here to add content          |
+| `src/registry.rs`   | **every block and item in the game** — start here to add content |
+| `src/inventory.rs`  | what a player has, and what crafting spends                      |
+| `src/hud.rs`        | crosshair, status line, and the hotbar you craft from            |
 | `src/world.rs`      | chunk storage and seed-deterministic terrain                     |
 | `src/mesh.rs`       | turning voxels into geometry                                     |
 | `src/player.rs`     | movement and collision                                           |
@@ -80,12 +107,19 @@ travels is which block, and what it became.
 
 ## Adding things
 
-New block: one `Block` variant, one arm in `Block::def`, and an entry in `PLACEABLE` if
-the player may place it. Nothing else — colour lives in the mesh, so there are no assets
-to make, and a variant with no arm fails to compile rather than crashing on first use.
+Everything lives in `src/registry.rs`, in two tables.
 
-Something that is not a block — a tool, a vehicle, something wearable — has no home in
-the registry yet. It gets one when the behaviour that makes it worth holding does.
+A **new thing to craft** is one row: an `Item` variant, an arm in `Item::def` naming its
+class and its recipe, and an entry in `Item::ALL`. It appears in the hotbar, is craftable,
+and travels over the network with no other file touched.
+
+A **new block** is the same plus its own half: a `Block` variant, an arm in `Block::def`
+giving it a colour, and an item of class `Block` that places it. Colour lives in the mesh,
+so there are no assets to make, and a variant with no arm fails to compile rather than
+crashing the first time somebody names it.
+
+What a tool, a vehicle or something wearable *does* is still nothing. Adding that is the
+work; having somewhere to put it is not.
 
 ## Develop
 

@@ -10,6 +10,9 @@
 //! they are facing.
 
 use bevy::prelude::*;
+use std::collections::HashMap;
+
+use crate::registry::Item;
 
 /// Which material a part is painted with. Add a colour here and to [`Palette`] together.
 #[derive(Clone, Copy)]
@@ -89,7 +92,17 @@ pub const SPACEMAN: &[Part] = &[
     part(Skin::Trim, [0.04, 0.30, 0.03], [0.145, 1.58, -0.215]),
 ];
 
-/// The materials [`SPACEMAN`] paints with. One per [`Skin`].
+/// The cube in a player's right mitten: where it sits, and how big it is.
+///
+/// One cube whatever is being carried, coloured from the item table. A rifle that is
+/// really a rifle is a model, and a model is a shape this file does not have yet — but a
+/// coloured block in the hand is enough to see *that* somebody swapped what they are
+/// holding, which is the thing the network has to prove it moved.
+const HELD_AT: [f32; 3] = [0.35, 0.60, -0.10];
+const HELD_SIZE: f32 = 0.18;
+
+/// The materials [`SPACEMAN`] paints with. One per [`Skin`], plus one per [`Item`] for
+/// whatever is in the hand.
 #[derive(Resource)]
 pub struct Palette {
     cube: Handle<Mesh>,
@@ -97,23 +110,33 @@ pub struct Palette {
     trim: Handle<StandardMaterial>,
     gear: Handle<StandardMaterial>,
     dark: Handle<StandardMaterial>,
+    /// Built from the registry, so a new item is drawable in a hand the moment it exists.
+    items: HashMap<Item, Handle<StandardMaterial>>,
 }
 
 impl Palette {
     pub fn new(meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>) -> Self {
-        let mut paint = |r, g, b, rough| {
+        let mut paint = |color, rough| {
             materials.add(StandardMaterial {
-                base_color: Color::srgb(r, g, b),
+                base_color: color,
                 perceptual_roughness: rough,
                 ..default()
             })
         };
+        let mut items = HashMap::new();
+        for item in Item::ALL {
+            // Linear, because that is the space the registry's colours are in — the same
+            // numbers the mesher bakes into a block's faces.
+            let [r, g, b] = item.color();
+            items.insert(*item, paint(Color::linear_rgb(r, g, b), 0.8));
+        }
         Self {
             cube: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
-            suit: paint(0.93, 0.94, 0.95, 0.85),
-            trim: paint(0.10, 0.60, 0.60, 0.7),
-            gear: paint(0.55, 0.58, 0.62, 0.8),
-            dark: paint(0.06, 0.09, 0.12, 0.25),
+            suit: paint(Color::srgb(0.93, 0.94, 0.95), 0.85),
+            trim: paint(Color::srgb(0.10, 0.60, 0.60), 0.7),
+            gear: paint(Color::srgb(0.55, 0.58, 0.62), 0.8),
+            dark: paint(Color::srgb(0.06, 0.09, 0.12), 0.25),
+            items,
         }
     }
 
@@ -127,11 +150,31 @@ impl Palette {
     }
 }
 
-/// Spawns one player body at `transform` (its feet) and returns the root entity. The ONE
-/// site a player model is created — remote players today, a visible local body tomorrow.
-pub fn spawn(commands: &mut Commands, palette: &Palette, transform: Transform) -> Entity {
-    commands
+/// One player's model: the body, and the hand whose contents change as they play.
+#[derive(Debug, Clone, Copy)]
+pub struct Body {
+    pub root: Entity,
+    hand: Entity,
+}
+
+/// Spawns one player body at `transform` (its feet). The ONE site a player model is
+/// created — remote players today, a visible local body tomorrow.
+pub fn spawn(commands: &mut Commands, palette: &Palette, transform: Transform) -> Body {
+    // Spawned empty-handed: a player who has picked nothing up yet is carrying nothing,
+    // and their first pose says what they are really holding.
+    let hand = commands
+        .spawn((
+            Transform {
+                translation: Vec3::from(HELD_AT),
+                scale: Vec3::splat(HELD_SIZE),
+                ..default()
+            },
+            Visibility::Hidden,
+        ))
+        .id();
+    let root = commands
         .spawn((transform, Visibility::Visible))
+        .add_child(hand)
         .with_children(|body| {
             for p in SPACEMAN {
                 body.spawn((
@@ -145,7 +188,25 @@ pub fn spawn(commands: &mut Commands, palette: &Palette, transform: Transform) -
                 ));
             }
         })
-        .id()
+        .id();
+    Body { root, hand }
+}
+
+/// Puts `held` in this body's hand, or empties it. Idempotent — the caller is a pose
+/// stream, and re-stating what is already there costs a component write.
+pub fn show_held(commands: &mut Commands, palette: &Palette, body: Body, held: Option<Item>) {
+    match held.and_then(|item| palette.items.get(&item)) {
+        Some(material) => {
+            commands.entity(body.hand).insert((
+                Mesh3d(palette.cube.clone()),
+                MeshMaterial3d(material.clone()),
+                Visibility::Visible,
+            ));
+        }
+        None => {
+            commands.entity(body.hand).insert(Visibility::Hidden);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -169,8 +230,11 @@ mod tests {
     /// metre, not to pretend the model fits.
     #[test]
     fn the_model_stands_in_the_player_box() {
+        // The held cube is a part like any other as far as the budget is concerned: it is
+        // out at arm's length, which is exactly where a part is most able to stick out.
+        let held = part(Skin::Gear, [HELD_SIZE; 3], HELD_AT);
         let (mut lowest, mut highest, mut widest) = (f32::MAX, f32::MIN, 0.0f32);
-        for p in SPACEMAN {
+        for p in SPACEMAN.iter().chain(std::iter::once(&held)) {
             lowest = lowest.min(p.at[1] - p.size[1] / 2.0);
             highest = highest.max(p.at[1] + p.size[1] / 2.0);
             for axis in [0, 2] {

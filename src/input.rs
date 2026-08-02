@@ -5,7 +5,7 @@
 //! Everything downstream reads [`Intent`] and never asks which device the player used, so
 //! remapping is a change to [`KEYS`] / [`PAD`] and nothing else.
 
-use crate::registry::Item;
+use crate::registry::HOTBAR_COLUMNS;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 
@@ -32,9 +32,14 @@ pub struct KeyBinds {
     pub quit: KeyCode,
     pub break_block: MouseButton,
     pub place_block: MouseButton,
-    /// Picks a hotbar slot outright, slot 0 first. Only the first [`Item::count`] of
-    /// these do anything; the assertion below is what keeps a new hotbar slot from
-    /// quietly having no key.
+    /// Makes one of whatever the hotbar cursor is on.
+    pub craft: KeyCode,
+    /// Step the hotbar cursor one cell.
+    pub prev_item: KeyCode,
+    pub next_item: KeyCode,
+    /// Picks a hotbar cell outright, the first cell first. The number row runs out long
+    /// before the hotbar does, which is why stepping exists: a new item needs a table row,
+    /// never a free key.
     pub slots: [KeyCode; 9],
 }
 
@@ -50,6 +55,9 @@ pub const KEYS: KeyBinds = KeyBinds {
     quit: KeyCode::Escape,
     break_block: MouseButton::Left,
     place_block: MouseButton::Right,
+    craft: KeyCode::KeyC,
+    prev_item: KeyCode::KeyQ,
+    next_item: KeyCode::KeyE,
     slots: [
         KeyCode::Digit1,
         KeyCode::Digit2,
@@ -63,17 +71,15 @@ pub const KEYS: KeyBinds = KeyBinds {
     ],
 };
 
-const _: () = assert!(
-    Item::count() <= KEYS.slots.len(),
-    "the number row has run out of keys for the hotbar"
-);
-
 /// Gamepad bindings, named for the Deck's face labels.
 pub struct PadBinds {
     /// A
     pub jump: GamepadButton,
     /// Y
     pub toggle_fly: GamepadButton,
+    /// X — makes one of whatever the hotbar cursor is on. The only face button no
+    /// movement action uses, so crafting never fights with jumping.
+    pub craft: GamepadButton,
     /// R2
     pub break_block: GamepadButton,
     /// L2
@@ -82,8 +88,13 @@ pub struct PadBinds {
     pub sprint: GamepadButton,
     /// L1 — hold to descend while flying
     pub descend: GamepadButton,
+    /// The hotbar cursor: left and right walk it a cell at a time, up and down jump a
+    /// whole row. Two rows of seven are reachable in at most four presses, which is what
+    /// keeps a growing item table from turning into a long press-and-hold.
     pub next_item: GamepadButton,
     pub prev_item: GamepadButton,
+    pub next_row: GamepadButton,
+    pub prev_row: GamepadButton,
     /// Held together to quit. A chord because quitting is instant and unconfirmed, and
     /// these two are the only buttons no gameplay action uses — a thumb cannot land on
     /// both mid-build.
@@ -93,12 +104,15 @@ pub struct PadBinds {
 pub const PAD: PadBinds = PadBinds {
     jump: GamepadButton::South,
     toggle_fly: GamepadButton::North,
+    craft: GamepadButton::West,
     break_block: GamepadButton::RightTrigger2,
     place_block: GamepadButton::LeftTrigger2,
     sprint: GamepadButton::RightTrigger,
     descend: GamepadButton::LeftTrigger,
     next_item: GamepadButton::DPadRight,
     prev_item: GamepadButton::DPadLeft,
+    next_row: GamepadButton::DPadDown,
+    prev_row: GamepadButton::DPadUp,
     quit: [GamepadButton::Select, GamepadButton::Start],
 };
 
@@ -116,10 +130,12 @@ pub struct Intent {
     pub toggle_fly: bool,
     pub break_block: bool,
     pub place_block: bool,
-    /// Hotbar movement, in slots (d-pad).
+    /// Hotbar cursor movement, in cells. A row is [`HOTBAR_COLUMNS`] of them.
     pub item_delta: i32,
-    /// An absolute hotbar slot, from the number-row keys.
+    /// An absolute hotbar cell, from the number-row keys.
     pub item_pick: Option<usize>,
+    /// Make one of whatever the cursor is on.
+    pub craft: bool,
     pub quit: bool,
 }
 
@@ -152,8 +168,11 @@ pub fn gather_intent(
     out.toggle_fly = keys.just_pressed(KEYS.toggle_fly);
     out.break_block = mouse.just_pressed(KEYS.break_block);
     out.place_block = mouse.just_pressed(KEYS.place_block);
+    out.craft = keys.just_pressed(KEYS.craft);
     out.quit = keys.just_pressed(KEYS.quit);
-    for (slot, key) in KEYS.slots.iter().take(Item::count()).enumerate() {
+    out.item_delta =
+        keys.just_pressed(KEYS.next_item) as i32 - keys.just_pressed(KEYS.prev_item) as i32;
+    for (slot, key) in KEYS.slots.iter().enumerate() {
         if keys.just_pressed(*key) {
             out.item_pick = Some(slot);
         }
@@ -176,8 +195,12 @@ pub fn gather_intent(
         out.toggle_fly |= pad.just_pressed(PAD.toggle_fly);
         out.break_block |= pad.just_pressed(PAD.break_block);
         out.place_block |= pad.just_pressed(PAD.place_block);
+        out.craft |= pad.just_pressed(PAD.craft);
         out.item_delta +=
             pad.just_pressed(PAD.next_item) as i32 - pad.just_pressed(PAD.prev_item) as i32;
+        out.item_delta += (pad.just_pressed(PAD.next_row) as i32
+            - pad.just_pressed(PAD.prev_row) as i32)
+            * HOTBAR_COLUMNS as i32;
         out.quit |= PAD.quit.iter().all(|&b| pad.pressed(b));
     }
 

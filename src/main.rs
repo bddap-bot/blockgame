@@ -6,7 +6,9 @@
 
 mod avatar;
 mod game;
+mod hud;
 mod input;
+mod inventory;
 mod mesh;
 mod net;
 mod player;
