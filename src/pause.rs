@@ -101,6 +101,7 @@ pub fn drive(
     mut sharing: Sharing,
     mut playing: ResMut<NextState<Playing>>,
     mut exit: MessageWriter<AppExit>,
+    mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
     let rows = choices(role.0);
     pause.cursor = menu::step(pause.cursor, rows.len(), menu_intent.step);
@@ -116,6 +117,10 @@ pub fn drive(
         Some(Choice::ShareTicket) => sharing.ticket(),
         Some(Choice::Resume) | None => playing.set(Playing::Live),
         Some(Choice::Quit) => {
+            // Hand the mouse back before going. No [`close`] runs on the way out — there
+            // is no state to leave — and a compositor that outlives the grab leaves the
+            // pointer stuck in a window that is not there any more.
+            grab_mouse(&mut cursor, false);
             exit.write(AppExit::Success);
         }
     }
