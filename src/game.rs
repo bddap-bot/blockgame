@@ -18,7 +18,7 @@ use crate::inventory::{Held, Inventories, Inventory};
 use crate::mesh::{ChunkMesh, build_chunk_mesh};
 use crate::net::wire::CarPose;
 use crate::net::{Boot, Event, Msg, PlayerId, Pose, Role, Session, Target};
-use crate::player::{self, Motion, Player};
+use crate::player::{self, Player};
 use crate::raycast;
 use crate::registry::{Block, Class, Item, Use};
 use crate::vehicle::{self, Ride};
@@ -252,6 +252,7 @@ pub fn run(boot: Boot) -> anyhow::Result<()> {
         Update,
         (
             gather_intent,
+            mind_the_body,
             park_or_ride,
             apply_intent,
             net_receive,
@@ -360,9 +361,8 @@ fn apply_intent(
     p.pitch = (p.pitch + intent.look.y).clamp(-PITCH_LIMIT, PITCH_LIMIT);
 
     // Getting better happens whatever they are doing, and above the driving branch on
-    // purpose: a winded child who crawled into their car would otherwise never get up.
+    // purpose: a winded child sitting in their car would otherwise never get up.
     p.condition.recover(dt);
-    let up = p.condition.on_their_feet();
 
     // Driving is the whole of movement while you are in a car: the car is what moves, the
     // seat is where you are, and steering is what turns you — so the camera follows the car
@@ -380,71 +380,29 @@ fn apply_intent(
 
     p.yaw += intent.look.x;
 
-    if intent.toggle_fly && up {
-        p.toggle_fly();
-    }
-
     // How the thing in hand falls: a parachute is the hotbar cell you are on, exactly as a
     // drill is, so opening the canopy is the d-pad and needs no button of its own.
     let fall = inventories.of(session.me()).falling(held.0);
-
-    let (forward, right) = p.move_basis();
-    let speed = if p.is_flying() {
-        player::FLY_SPEED
-    } else if intent.sprint {
-        player::SPRINT_SPEED
-    } else {
-        player::WALK_SPEED
-    };
-    // Winded is not a state with its own movement rules — it is the stick reading zero.
-    let walk = if up { intent.walk } else { Vec2::ZERO };
-    let horizontal = (forward * walk.y + right * walk.x) * speed;
-
-    let delta = match &mut p.motion {
-        Motion::Flying => (horizontal + Vec3::Y * intent.vertical * player::FLY_SPEED) * dt,
-        Motion::Walking { velocity, grounded } => {
-            if intent.jump && *grounded && up {
-                velocity.y = player::JUMP_SPEED;
-            }
-            velocity.y = (velocity.y - player::GRAVITY * dt).max(-fall.max_speed);
-            // The canopy is only open in the air and on the way down, so a parachute buys a
-            // glide — never a longer jump, and never a faster walk. Standing on the ground
-            // is falling by a fraction of a block a frame, which is why `grounded` is asked
-            // and not just the sign of the speed.
-            let drift = if !*grounded && velocity.y < 0.0 {
-                fall.drift
-            } else {
-                1.0
-            };
-            (horizontal * drift + Vec3::Y * velocity.y) * dt
-        }
-    };
-
-    let moved = player::move_and_slide(&sim.0, p.pos, delta);
-    p.pos = moved.pos;
-    let mut hurt = 0.0;
-    if let Motion::Walking { velocity, grounded } = &mut p.motion {
-        // How fast they hit it, read before the floor takes the speed away. A blocked Y with
-        // the velocity still pointing down is a landing; pointing up it is the ceiling.
-        let landing = (moved.blocked.y && velocity.y < 0.0).then_some(-velocity.y);
-        // Whatever stopped the move kills the speed along that axis. The ceiling half
-        // matters as much as the floor: without it, a jump under an overhang leaves the
-        // player pinned there until gravity wins.
-        *velocity = Vec3::select(moved.blocked, Vec3::ZERO, *velocity);
-        *grounded = moved.grounded();
-        if let Some(speed) = landing {
-            let it = player::land(speed, moved.ground);
-            hurt = it.hurt;
-            velocity.y = it.rebound;
-            // Thrown back into the air by a cushion: not standing on it, so the next frame
-            // is a fall and not a free second jump off the bounce.
-            *grounded &= velocity.y == 0.0;
-        }
-    }
-    p.condition.hurt(hurt);
+    player::advance(&sim.0, p, &intent, fall, dt);
 
     pick_item(&intent, &mut held);
     aim_camera(p, &mut camera);
+}
+
+/// What a body flat on its back can still ask for.
+///
+/// One place, above everything that acts on an [`Intent`], so being winded gates driving,
+/// digging, placing, crafting and climbing into a car for free — rather than each of those
+/// systems having to remember a check, and one of them forgetting. Looking round and
+/// quitting survive: a child who cannot see out, or cannot put the game down, is stuck.
+fn mind_the_body(me: Res<Me>, mut intent: ResMut<Intent>) {
+    if !me.0.condition.on_their_feet() {
+        *intent = Intent {
+            look: intent.look,
+            quit: intent.quit,
+            ..Intent::default()
+        };
+    }
 }
 
 /// Moves the hotbar cursor. The number row reaches the first nine cells; stepping reaches

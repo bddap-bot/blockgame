@@ -1,11 +1,15 @@
-//! Player state and voxel collision.
+//! Player state, voxel collision, and what a fall does to whoever took it.
 //!
 //! The player is an axis-aligned box that slides along blocks. Collision is resolved one
-//! axis at a time — the cheapest scheme that still lets you walk up to a wall, strafe
-//! along it, and not tunnel through the floor. The collision half is pure functions over
-//! [`World`], so it is unit-testable without a window; `game::apply_intent` is what drives
-//! it each frame, and what turns input into the `delta` handed to [`move_and_slide`].
+//! axis at a time — the cheapest scheme that still lets you walk up to a wall, strafe along
+//! it, and not tunnel through the floor.
+//!
+//! All of it is functions over a [`World`] and an [`Intent`], so every number a player feels
+//! is testable without a window: [`advance`] is one whole frame of moving about, and
+//! `game::apply_intent` is the wrapper that hands it the world, the stick, and how the thing
+//! in hand falls.
 
+use crate::input::Intent;
 use crate::registry::{Block, Fall};
 use crate::vehicle::Ride;
 use crate::world::{BlockPos, WORLD_HEIGHT, World};
@@ -36,12 +40,20 @@ pub const MAX_HEALTH: f32 = 10.0;
 pub const SAFE_LANDING_SPEED: f32 = 15.0;
 const _: () = assert!(SAFE_LANDING_SPEED > JUMP_SPEED);
 
-/// Hearts a landing costs per block-per-second it is over [`SAFE_LANDING_SPEED`].
+/// The landing that takes a whole player, in blocks per second — what a drop of about
+/// thirty blocks arrives at. `the_worst_drop_is_a_cliff_somebody_could_fall_off` pins the
+/// two together.
 ///
-/// Derived rather than chosen, so the worst fall there is costs exactly one player: nothing
-/// slower than terminal can empty the bar, and terminal empties it with none to spare,
-/// whatever either number is later changed to.
-pub const HEARTS_PER_SPEED: f32 = MAX_HEALTH / (Fall::UNAIDED.max_speed - SAFE_LANDING_SPEED);
+/// Chosen against the world rather than derived from [`Fall::UNAIDED`], which is the mistake
+/// worth naming: terminal speed needs a drop of nearly sixty blocks and nothing in the
+/// terrain is that tall, so a curve pegged there charges a sliver for every fall a child can
+/// really take, and leaves the cushion and the parachute with nothing to save them from.
+/// Thirty is about the tallest cliff the generator makes.
+pub const WORST_LANDING_SPEED: f32 = 39.5;
+const _: () = assert!(SAFE_LANDING_SPEED < WORST_LANDING_SPEED);
+
+/// Hearts a landing costs per block-per-second it is over [`SAFE_LANDING_SPEED`].
+pub const HEARTS_PER_EXCESS_SPEED: f32 = MAX_HEALTH / (WORST_LANDING_SPEED - SAFE_LANDING_SPEED);
 
 /// Hearts a player gets back per second just by carrying on.
 ///
@@ -56,14 +68,19 @@ pub const HEAL_RATE: f32 = 0.5;
 /// their own tower gets their breath back where they landed, which is also the only story
 /// the host can tell: health is the falling player's own business, so a death that
 /// teleported them would be a jump across the map that no peer could vouch for.
-pub const WINDED_TIME: f32 = 2.0;
+pub const WINDED_TIME: f32 = 3.0;
+// No child sits still for longer, and this is time with the stick doing nothing.
+const _: () = assert!(WINDED_TIME <= 5.0);
 
 /// Slowest bounce worth having, in blocks per second.
 ///
 /// Below it a landing simply stops, because a bounce of a few centimetres is not a bounce —
 /// it is a player resting on a cushion twitching once per frame as gravity and the spring
-/// trade the same sliver back and forth.
-pub const BOUNCE_FLOOR: f32 = 2.0;
+/// trade the same sliver back and forth. Above what a standing frame lands at even on the
+/// longest frame the game allows, and under what a jump lands at, so hopping on a cushion
+/// still hops.
+pub const BOUNCE_FLOOR: f32 = 3.0;
+const _: () = assert!(BOUNCE_FLOOR < JUMP_SPEED);
 
 /// The column the world spawns everybody over. One pair of coordinates, so "where is spawn"
 /// has a single answer.
@@ -96,7 +113,7 @@ pub enum Motion {
 /// Two states rather than a heart count and a `winded` flag beside it: "winded with seven
 /// hearts left" and "up and about with none" are both nonsense, and neither can be written
 /// down. Running out is not death — there is nothing to lose and nowhere to wake up — it is
-/// a couple of seconds flat on your back, and then you are whole again.
+/// a few seconds flat on your back, and then back up on what those seconds healed.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Condition {
     /// On their feet, with this many of [`MAX_HEALTH`] hearts left. Always above zero.
@@ -126,16 +143,21 @@ impl Condition {
         }
     }
 
-    /// A moment of getting better: breath back while down, hearts back once up. They come
-    /// up whole, because half a bar and no way to see why is not something to explain to a
-    /// six-year-old.
+    /// A moment of getting better: breath back while down, hearts back once up.
+    ///
+    /// Getting up buys exactly what the same seconds spent walking would have — no more, so
+    /// running out is never a shortcut. Coming up *whole* is the version that bites: a child
+    /// on their last heart would be better off jumping off the nearest cliff than walking it
+    /// off, and jumping off things is the game.
     pub fn recover(&mut self, dt: f32) {
         match self {
             Condition::Well { health } => *health = (*health + HEAL_RATE * dt).min(MAX_HEALTH),
             Condition::Winded { left } => {
                 *left -= dt;
                 if *left <= 0.0 {
-                    *self = Condition::WHOLE;
+                    *self = Condition::Well {
+                        health: WINDED_TIME * HEAL_RATE,
+                    };
                 }
             }
         }
@@ -145,26 +167,31 @@ impl Condition {
 /// What hitting the ground did.
 pub struct Landing {
     /// Hearts it cost.
-    pub hurt: f32,
+    pub cost: f32,
     /// How fast it throws them back up, or zero for a landing that simply stops them.
     pub rebound: f32,
 }
 
 /// Coming down at `speed` blocks per second onto `ground`.
 ///
-/// `ground` is what they came down on, or `None` for a stop against nothing to stand on —
-/// clipping the corner of a ledge on the way past it. Both halves are decided here together
-/// because they are the same fact about the block: what breaks a fall is what throws you
-/// back up, so nothing can be springy and punishing at once.
-pub fn land(speed: f32, ground: Option<Block>) -> Landing {
-    let up = speed * ground.map_or(0.0, Block::bounce);
+/// Both halves are decided here together because they are the same fact about the block:
+/// what breaks a fall is what throws you back up, so nothing can be springy and punishing
+/// at once.
+///
+/// Takes the block itself and not an `Option` of one on purpose. [`move_and_slide`] reports
+/// blocked-on-every-axis both for a landing and for a move it could not evaluate at all —
+/// being pushed out of a block somebody built into you, or waiting on terrain nobody has
+/// generated — and a caller that let the second reach here would charge a child a whole
+/// player's health for touching nothing.
+pub fn land(speed: f32, ground: Block) -> Landing {
+    let up = speed * ground.bounce();
     Landing {
         // Soft ground costs nothing however far the fall was — that is the whole of what a
         // cushion is for.
-        hurt: if ground.is_some_and(Block::soft) || speed <= SAFE_LANDING_SPEED {
+        cost: if ground.soft() || speed <= SAFE_LANDING_SPEED {
             0.0
         } else {
-            (speed - SAFE_LANDING_SPEED) * HEARTS_PER_SPEED
+            (speed - SAFE_LANDING_SPEED) * HEARTS_PER_EXCESS_SPEED
         },
         rebound: if up < BOUNCE_FLOOR { 0.0 } else { up },
     }
@@ -510,6 +537,81 @@ fn push_out(world: &World, pos: Vec3) -> Vec3 {
     pos + Vec3::Y
 }
 
+/// One frame of movement on foot or in the air: the stick, gravity, the collision, and what
+/// the landing did to the player who made it.
+///
+/// The whole of moving about, as a function over the world and an [`Intent`] — so every
+/// number a child actually feels is testable without a window, and `game::apply_intent` is
+/// the wrapper that hands it the world, the stick, and how the thing in hand falls. Driving
+/// is deliberately not here: a car is what moves then, and `motion` is not consulted at all.
+///
+/// Being flat on your back is not a rule in here either. It is the intent arriving empty —
+/// see `game::mind_the_body` — which is what gates every movement path at once, rather than
+/// each of them having to remember.
+pub fn advance(world: &World, p: &mut Player, intent: &Intent, fall: Fall, dt: f32) {
+    if intent.toggle_fly {
+        p.toggle_fly();
+    }
+
+    let (forward, right) = p.move_basis();
+    let speed = if p.is_flying() {
+        FLY_SPEED
+    } else if intent.sprint {
+        SPRINT_SPEED
+    } else {
+        WALK_SPEED
+    };
+    let horizontal = (forward * intent.walk.y + right * intent.walk.x) * speed;
+
+    let delta = match &mut p.motion {
+        Motion::Flying => (horizontal + Vec3::Y * intent.vertical * FLY_SPEED) * dt,
+        Motion::Walking { velocity, grounded } => {
+            if intent.jump && *grounded {
+                velocity.y = JUMP_SPEED;
+            }
+            velocity.y = (velocity.y - GRAVITY * dt).max(-fall.max_speed);
+            // The canopy is open exactly when it is the thing holding the fall back, which
+            // is a fact about the speed already and needs no flag beside it: standing on the
+            // ground is falling by a fraction of a block a frame, on the way up nothing is
+            // holding anything back, and with nothing on there is no canopy to open.
+            let drift = if velocity.y <= -fall.max_speed {
+                fall.drift
+            } else {
+                1.0
+            };
+            (horizontal * drift + Vec3::Y * velocity.y) * dt
+        }
+    };
+
+    let moved = move_and_slide(world, p.pos, delta);
+    p.pos = moved.pos;
+
+    let mut cost = 0.0;
+    if let Motion::Walking { velocity, grounded } = &mut p.motion {
+        // How fast they hit it, read before the floor takes the speed away.
+        let impact = (moved.blocked.y && velocity.y < 0.0).then_some(-velocity.y);
+        // Whatever stopped the move kills the speed along that axis. The ceiling half
+        // matters as much as the floor: without it, a jump under an overhang leaves the
+        // player pinned there until gravity wins.
+        *velocity = Vec3::select(moved.blocked, Vec3::ZERO, *velocity);
+        // A landing needs both halves: stopped downwards, *and* ground underneath to have
+        // been stopped by. Stopped downwards on its own is also how a move that could not be
+        // evaluated reports itself — see [`land`].
+        match (impact, moved.ground) {
+            (Some(speed), Some(ground)) => {
+                let landing = land(speed, ground);
+                cost = landing.cost;
+                velocity.y = landing.rebound;
+                // Thrown back into the air by a cushion is not standing on it, so the next
+                // frame is a fall and not a free second jump off the bounce.
+                *grounded = landing.rebound == 0.0;
+            }
+            _ => *grounded = moved.grounded(),
+        }
+    }
+    p.condition.hurt(cost);
+}
+
 /// Where everybody starts, above the terrain over [`SPAWN_COLUMN`].
 pub fn spawn_point(world: &World) -> Vec3 {
     let (x, z) = SPAWN_COLUMN;
@@ -737,21 +839,39 @@ mod tests {
 
     #[test]
     fn a_short_drop_costs_nothing_and_a_long_one_costs_the_lot() {
-        let onto_grass = |speed| land(speed, Some(Block::Grass)).hurt;
+        let onto_grass = |speed| land(speed, Block::Grass).cost;
         assert_eq!(onto_grass(JUMP_SPEED), 0.0, "a hop");
         assert_eq!(onto_grass(dropping(4.0)), 0.0);
         assert!(onto_grass(dropping(5.0)) > 0.0, "five blocks is a fall");
 
-        // Gentle: the height a child builds a tower to costs a fifth of them.
+        // Gentle, but felt: off the roof of the house a child built costs a third of them.
         let ten = onto_grass(dropping(10.0));
         assert!(
-            (1.0..3.0).contains(&ten),
+            (2.0..5.0).contains(&ten),
             "a ten-block drop cost {ten} hearts"
         );
+        assert!(
+            onto_grass(dropping(20.0)) < MAX_HEALTH,
+            "and a twenty-block one is still survivable"
+        );
+    }
 
-        // And the worst fall there is costs exactly one player, with none to spare.
-        let worst = onto_grass(Fall::UNAIDED.max_speed);
-        assert!((worst - MAX_HEALTH).abs() < 1e-4, "terminal cost {worst}");
+    /// The curve is pegged to a fall somebody can really take. Terminal speed needs a drop of
+    /// nearly sixty blocks and the terrain has nothing like it, so a curve pegged there would
+    /// charge a sliver for every real fall — and leave the cushion with nothing to save.
+    #[test]
+    fn the_worst_drop_is_a_cliff_somebody_could_fall_off() {
+        assert!(
+            (dropping(30.0) - WORST_LANDING_SPEED).abs() < 0.5,
+            "thirty blocks lands at {}",
+            dropping(30.0)
+        );
+        let worst = land(WORST_LANDING_SPEED, Block::Grass).cost;
+        assert!((worst - MAX_HEALTH).abs() < 1e-4, "it cost {worst}");
+        assert!(
+            dropping(58.0) > WORST_LANDING_SPEED * 1.3,
+            "terminal really is out of the terrain's reach"
+        );
     }
 
     /// The cushion, in one assertion: however far you fell, landing on one costs nothing,
@@ -759,22 +879,32 @@ mod tests {
     #[test]
     fn a_cushion_takes_the_whole_of_a_landing_and_gives_some_back() {
         for blocks in [5.0, 20.0, 100.0] {
-            let it = land(dropping(blocks), Some(Block::Cushion));
-            assert_eq!(it.hurt, 0.0, "{blocks} blocks onto a cushion");
+            let it = land(dropping(blocks), Block::Cushion);
+            assert_eq!(it.cost, 0.0, "{blocks} blocks onto a cushion");
             assert!(
                 it.rebound > BOUNCE_FLOOR && it.rebound < dropping(blocks),
                 "{blocks} blocks bounced back at {}",
                 it.rebound
             );
         }
+        // Stepping off a two-block ledge is the smallest thing anybody does on purpose, and
+        // a trampoline that only works from a great height is not a trampoline.
+        assert!(land(dropping(2.0), Block::Cushion).rebound > 0.0);
 
-        let stone = land(dropping(20.0), Some(Block::Stone));
-        assert!(stone.hurt > 0.0 && stone.rebound == 0.0, "stone is stone");
-        assert_eq!(land(dropping(20.0), None).rebound, 0.0, "nothing to hit");
-        assert_eq!(
-            land(BOUNCE_FLOOR, Some(Block::Cushion)).rebound,
-            0.0,
-            "resting on a cushion is resting, not twitching"
+        let stone = land(dropping(20.0), Block::Stone);
+        assert!(stone.cost > 0.0 && stone.rebound == 0.0, "stone is stone");
+    }
+
+    /// Resting on a cushion is resting. Gravity puts a sliver of downward speed into every
+    /// standing frame, and giving a fraction of it back is a player twitching for ever —
+    /// checked at the longest frame the game allows, which is the worst case.
+    #[test]
+    fn standing_on_a_cushion_does_not_twitch() {
+        let longest_frame = GRAVITY * 0.05;
+        assert_eq!(land(longest_frame, Block::Cushion).rebound, 0.0);
+        assert!(
+            land(JUMP_SPEED, Block::Cushion).rebound > 0.0,
+            "but hopping on one still hops"
         );
     }
 
@@ -802,7 +932,27 @@ mod tests {
         );
 
         c.recover(WINDED_TIME);
-        assert_eq!(c, Condition::WHOLE, "up again, and whole");
+        assert!(c.on_their_feet(), "up again");
+    }
+
+    /// Running out must never be a *shortcut*. Coming up whole is the version that bites: a
+    /// child on their last heart would then be better off jumping off the nearest cliff than
+    /// walking it off, and jumping off things is the whole game.
+    #[test]
+    fn being_winded_is_never_faster_than_walking_it_off() {
+        let mut down = Condition::WHOLE;
+        down.hurt(MAX_HEALTH);
+        down.recover(WINDED_TIME);
+
+        // The same stretch of time, spent upright by somebody who was just as empty.
+        let mut walking = Condition::Well { health: 1e-6 };
+        walking.recover(WINDED_TIME);
+
+        let (Condition::Well { health: got }, Condition::Well { health: earned }) = (down, walking)
+        else {
+            panic!("both should be on their feet: {down:?} {walking:?}");
+        };
+        assert!(got <= earned, "getting up paid {got} for {earned} of time");
     }
 
     /// Hearts come back on their own, and stop at full.
@@ -811,7 +961,12 @@ mod tests {
         let mut c = Condition::WHOLE;
         c.hurt(4.0);
         c.recover(1.0);
-        assert_eq!(c, Condition::Well { health: 6.5 });
+        assert_eq!(
+            c,
+            Condition::Well {
+                health: MAX_HEALTH - 4.0 + HEAL_RATE
+            }
+        );
         c.recover(1_000.0);
         assert_eq!(c, Condition::WHOLE, "and no further");
     }
@@ -823,12 +978,17 @@ mod tests {
     #[test]
     fn a_parachute_makes_every_fall_survivable() {
         let canopy = crate::registry::Item::Parachute.falling();
+        assert_eq!(land(canopy.max_speed, Block::Stone).cost, 0.0);
         assert!(
-            canopy.max_speed < Fall::UNAIDED.max_speed,
-            "it slows a fall"
+            canopy.max_speed < JUMP_SPEED,
+            "coming down under one is gentler than a hop, not merely survivable"
         );
-        assert_eq!(land(canopy.max_speed, Some(Block::Stone)).hurt, 0.0);
-        assert!(canopy.drift > Fall::UNAIDED.drift, "and it steers");
+        // A canopy that carried you no further than it dropped you would not be worth
+        // reaching for: what makes it a parachute is going somewhere on the way down.
+        assert!(
+            canopy.drift * WALK_SPEED > canopy.max_speed,
+            "it steers further than it falls"
+        );
     }
 
     /// A fall that clipped the corner of a roof and slid off it landed on nothing: asking
@@ -864,6 +1024,177 @@ mod tests {
             m.ground,
             Some(Block::Cushion),
             "the softest thing under you"
+        );
+    }
+
+    /// A player on their feet at `pos`, ready to be walked a frame at a time.
+    fn walker(pos: Vec3) -> Player {
+        let mut p = Player::spawn_at(pos);
+        p.stand();
+        p
+    }
+
+    /// `n` frames at sixty a second, which is what the game really runs.
+    ///
+    /// Deliberately without [`Condition::recover`] — that is the wrapper's job, and healing
+    /// half a heart a second while measuring what a fall cost would measure neither.
+    fn frames(w: &World, p: &mut Player, intent: &Intent, fall: Fall, n: u32) {
+        for _ in 0..n {
+            advance(w, p, intent, fall, 1.0 / 60.0);
+        }
+    }
+
+    /// The stick pushed `x` to the right and nothing else.
+    fn stick(x: f32) -> Intent {
+        Intent {
+            walk: bevy::math::Vec2::new(x, 0.0),
+            ..Intent::default()
+        }
+    }
+
+    /// A floor of `block` across the chunk, and nothing else.
+    fn floor_of(block: Block) -> World {
+        let mut w = floor_world();
+        for z in 0..crate::world::CHUNK_SIZE {
+            for x in 0..crate::world::CHUNK_SIZE {
+                w.set_block(BlockPos::new(x, 10, z), block);
+            }
+        }
+        w
+    }
+
+    /// The whole feature driven through the frame loop rather than through [`land`] alone: a
+    /// long drop off a tower really does cost a child hearts, and the same drop onto a
+    /// cushion really does cost nothing.
+    #[test]
+    fn a_long_drop_costs_hearts_and_a_cushion_saves_them() {
+        let onto = |block| {
+            let w = floor_of(block);
+            let mut p = walker(Vec3::new(8.5, 30.0, 8.5));
+            frames(&w, &mut p, &Intent::default(), Fall::UNAIDED, 300);
+            p.condition
+        };
+
+        let hard = onto(Block::Stone);
+        assert!(
+            matches!(hard, Condition::Well { health } if health < MAX_HEALTH - 3.0),
+            "nineteen blocks onto stone cost nothing: {hard:?}"
+        );
+        assert_eq!(onto(Block::Cushion), Condition::WHOLE, "onto a cushion");
+    }
+
+    /// A cushion throws you back up, and being thrown back up is not standing on it — else
+    /// the frame after a bounce hands out a second jump off ground you have already left.
+    #[test]
+    fn a_bounce_puts_you_in_the_air_and_then_settles() {
+        let w = floor_of(Block::Cushion);
+        let mut p = walker(Vec3::new(8.5, 11.2, 8.5));
+        if let Motion::Walking { velocity, .. } = &mut p.motion {
+            velocity.y = -20.0;
+        }
+
+        frames(&w, &mut p, &Intent::default(), Fall::UNAIDED, 1);
+        let Motion::Walking { velocity, grounded } = p.motion else {
+            panic!("walking");
+        };
+        assert!(velocity.y > 0.0, "did not bounce: {velocity}");
+        assert!(!grounded, "bounced into the air and still standing on it");
+
+        // And it converges: a cushion that kept giving back what it took would be a child
+        // bouncing for ever, higher each time.
+        frames(&w, &mut p, &Intent::default(), Fall::UNAIDED, 600);
+        assert!(
+            matches!(p.motion, Motion::Walking { grounded: true, .. }),
+            "never came to rest: {:?} at y={}",
+            p.motion,
+            p.pos.y
+        );
+    }
+
+    /// [`move_and_slide`] reports blocked-on-everything both for a landing and for a move it
+    /// could not evaluate. Reading the second as a landing on bare rock charges a child a
+    /// whole player's health for touching terrain nobody has generated yet — which is every
+    /// joining peer's first seconds.
+    #[test]
+    fn waiting_for_terrain_is_not_a_fall_you_can_be_hurt_by() {
+        let w = World::new(1, []);
+        let start = Vec3::new(8.5, 50.0, 8.5);
+        let mut p = walker(start);
+        frames(&w, &mut p, &Intent::default(), Fall::UNAIDED, 300);
+        assert_eq!(p.condition, Condition::WHOLE, "hurt by nothing at all");
+        assert_eq!(p.pos, start, "and neither fell nor teleported");
+    }
+
+    /// The other half of the same sentinel: a peer may build a block into you, and being
+    /// pushed back out of it is not a fall you landed from.
+    #[test]
+    fn a_block_built_into_you_mid_fall_does_not_hurt_you() {
+        let mut w = floor_world();
+        let mut p = walker(Vec3::new(8.5, 20.0, 8.5));
+        frames(&w, &mut p, &Intent::default(), Fall::UNAIDED, 30);
+
+        w.set_block(BlockPos::containing(p.pos), Block::Stone);
+        assert_eq!(
+            overlap(&w, p.pos),
+            Overlap::Solid,
+            "the test needs them in it"
+        );
+
+        frames(&w, &mut p, &Intent::default(), Fall::UNAIDED, 1);
+        assert_eq!(p.condition, Condition::WHOLE, "charged for a push-out");
+    }
+
+    /// The parachute through the frame loop: the drop that takes a whole player without one
+    /// costs nothing with one.
+    #[test]
+    fn a_parachute_turns_a_killing_drop_into_a_walk_down() {
+        let w = floor_world();
+        let drop = |fall| {
+            let mut p = walker(Vec3::new(8.5, 60.0, 8.5));
+            frames(&w, &mut p, &Intent::default(), fall, 900);
+            p.condition
+        };
+        assert!(
+            !drop(Fall::UNAIDED).on_their_feet(),
+            "fifty blocks onto stone should take a whole player"
+        );
+        assert_eq!(
+            drop(crate::registry::Item::Parachute.falling()),
+            Condition::WHOLE
+        );
+    }
+
+    /// What the canopy buys on the way down, and what it must not buy anywhere else. A
+    /// parachute that quietly made a child faster on foot would be the best boots in the
+    /// game, and nobody would ever fall with it.
+    #[test]
+    fn a_canopy_steers_a_fall_and_does_nothing_on_the_ground() {
+        let w = floor_world();
+        let canopy = crate::registry::Item::Parachute.falling();
+
+        // Half a second of falling to get the canopy open, then half a second of stick.
+        let glide = |fall| {
+            let mut p = walker(Vec3::new(8.5, 40.0, 8.5));
+            frames(&w, &mut p, &Intent::default(), fall, 30);
+            let from = p.pos.x;
+            frames(&w, &mut p, &stick(1.0), fall, 30);
+            p.pos.x - from
+        };
+        let (with, without) = (glide(canopy), glide(Fall::UNAIDED));
+        assert!(
+            with > without * 1.2,
+            "the canopy carried {with} where a bare fall carried {without}"
+        );
+
+        let walked = |fall| {
+            let mut p = walker(Vec3::new(4.5, 11.0, 8.5));
+            frames(&w, &mut p, &stick(1.0), fall, 30);
+            p.pos.x
+        };
+        assert_eq!(
+            walked(canopy),
+            walked(Fall::UNAIDED),
+            "a canopy is not a pair of boots"
         );
     }
 

@@ -113,9 +113,11 @@ impl Block {
                 // grown from across a valley — which is the point of the first thing a
                 // player crafts.
                 color: [0.86, 0.36, 0.60],
-                // Enough to throw a child who dropped ten blocks a couple back up, which is
-                // what makes a cushion something to jump *onto* rather than a safety mat.
-                bounce: 0.5,
+                // A bounce reaches a sixth of the height it came from, so a ten-block drop
+                // throws a child a block and a half back up — visibly a trampoline, and not
+                // so much that a fall from a tower relaunches them off the pad and onto the
+                // stone beside it.
+                bounce: 0.4,
                 ..GROUND
             },
         }
@@ -231,8 +233,22 @@ impl Fall {
 
     /// How this reads on the HUD, or nothing for an ordinary fall — a player holding a nail
     /// is told about the nail, not about gravity.
+    ///
+    /// Read off both numbers, as [`Use::summary`] is off reach and speed, so an equippable
+    /// that only slows a fall or only steers one still says what it does. A row whose words
+    /// were one hardcoded string would let the next one change the physics under a player
+    /// and tell them nothing.
     pub fn summary(self) -> Option<String> {
-        (self.max_speed < Fall::UNAIDED.max_speed).then(|| "floats down and steers".to_string())
+        let words = match (
+            self.max_speed < Fall::UNAIDED.max_speed,
+            self.drift > Fall::UNAIDED.drift,
+        ) {
+            (true, true) => "floats down and steers",
+            (true, false) => "floats down",
+            (false, true) => "steers as you fall",
+            (false, false) => return None,
+        };
+        Some(words.to_string())
     }
 }
 
@@ -803,11 +819,11 @@ mod tests {
         }
     }
 
-    /// A block that gave back everything it took would be a child bouncing on a cushion for
-    /// ever, higher each time. Half of what it took is a trampoline; all of it is a bug.
-    #[test]
-    fn nothing_bounces_higher_than_it_fell() {
-        for block in [
+    /// Every voxel kind there is — what the rules that must hold of *all* of them are checked
+    /// against. The `match` is what keeps it complete: a new variant stops this compiling, so
+    /// it cannot be added without joining those rules.
+    fn every_block() -> [Block; 9] {
+        let all = [
             Block::Air,
             Block::Grass,
             Block::Dirt,
@@ -817,7 +833,29 @@ mod tests {
             Block::Leaves,
             Block::Bedrock,
             Block::Cushion,
-        ] {
+        ];
+        for block in all {
+            match block {
+                Block::Air
+                | Block::Grass
+                | Block::Dirt
+                | Block::Stone
+                | Block::Sand
+                | Block::Wood
+                | Block::Leaves
+                | Block::Bedrock
+                | Block::Cushion => {}
+            }
+        }
+        all
+    }
+
+    /// A block that gave back everything it took would be a child bouncing on a cushion for
+    /// ever, higher each time. A fraction of what it took is a trampoline; all of it is a
+    /// bug — checked over every block, so the tenth cannot slip past.
+    #[test]
+    fn nothing_bounces_higher_than_it_fell() {
+        for block in every_block() {
             assert!(
                 (0.0..1.0).contains(&block.bounce()),
                 "{block:?} bounces {}",

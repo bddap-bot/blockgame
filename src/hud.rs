@@ -13,7 +13,7 @@ use bevy::prelude::*;
 use crate::game::{Me, NetRole, Peers};
 use crate::inventory::{Held, Inventories};
 use crate::net::{Role, Session};
-use crate::player::{self, Condition};
+use crate::player::{self, Condition, Player};
 use crate::registry::{Class, HOTBAR_COLUMNS, Item};
 
 /// Cell size, in the Deck's 1280x800 pixels. Seven of these across is 766px — wide enough
@@ -168,49 +168,57 @@ pub fn update_status(
     let Ok(mut text) = text.single_mut() else {
         return;
     };
-    let mode = if me.0.is_driving() {
-        "driving"
-    } else if me.0.is_flying() {
-        "flying"
-    } else {
-        "walking"
-    };
     // The ticket gets its own line: 64 characters do not share a row with anything else
     // on the Deck's 1280px panel.
     let who = match role.0 {
         Role::Host => format!("join ticket:  {}", session.ticket()),
         Role::Peer { .. } => "in a friend's world".to_string(),
     };
-    // ASCII only: bevy's built-in font has no glyph for a middle dot, and a missing glyph
-    // draws as a tofu box.
     write(
         &mut text,
-        format!(
-            "{mode}  |  {} player(s)  |  {}\n{who}",
-            peers.0.len() + 1,
-            body(me.0.condition)
-        ),
+        format!("{}\n{who}", status(&me.0, peers.0.len() + 1)),
     );
+}
+
+/// Characters wide the health bar is: one per heart.
+const HEARTS: usize = player::MAX_HEALTH as usize;
+const _: () = assert!(HEARTS as f32 == player::MAX_HEALTH);
+
+/// The first line of the status text: what they are doing, who else is here, and how they
+/// are. Built here rather than inline so `the_status_line_fits_the_deck_panel` measures the
+/// line the player really sees and not a copy of it.
+///
+/// ASCII only: bevy's built-in font has no glyph for a middle dot, and a missing glyph draws
+/// as a tofu box.
+fn status(me: &Player, players: usize) -> String {
+    let mode = match me.condition {
+        // What their body is doing beats where it is: "walking" beside "winded" is the HUD
+        // contradicting itself in one line, and a child reads the first word.
+        Condition::Winded { .. } => "lying down",
+        Condition::Well { .. } if me.is_driving() => "driving",
+        Condition::Well { .. } if me.is_flying() => "flying",
+        Condition::Well { .. } => "walking",
+    };
+    format!("{mode}  |  {players} player(s)  |  {}", health_bar(me))
 }
 
 /// The health bar, or what is happening instead of one.
 ///
 /// Drawn out of hashes because bevy's built-in font has no heart in it, and a bar of
 /// characters is legible across the room on the Deck's panel where a number is not.
-fn body(condition: Condition) -> String {
-    match condition {
+fn health_bar(me: &Player) -> String {
+    match me.condition {
         Condition::Well { health } => {
-            // Ceiling, so the last sliver of a heart still shows as one: a bar that reads
-            // empty while its owner is up and walking about is a bar that lies.
-            let full = (health.ceil() as usize).min(HEARTS);
+            // Floor, so a fall that cost most of a heart takes one off the bar. Rounding up
+            // instead hides every drop under seven blocks, which is the whole range a small
+            // child lives in — and the `1` floor is what stops it reading empty while its
+            // owner is up and walking about.
+            let full = (health.floor() as usize).clamp(1, HEARTS);
             format!("health [{}{}]", "#".repeat(full), "-".repeat(HEARTS - full))
         }
         Condition::Winded { .. } => "winded - catching your breath".to_string(),
     }
 }
-
-/// Characters wide the health bar is: one per heart.
-const HEARTS: usize = player::MAX_HEALTH as usize;
 
 /// Sets a label, and only when it actually reads differently.
 ///
@@ -334,6 +342,15 @@ fn readable_on(r: f32, g: f32, b: f32) -> Color {
 mod tests {
     use super::*;
 
+    /// A player who has taken `hearts` of damage — built through [`Condition::hurt`] rather
+    /// than by writing a `Condition` down, so the states the bar is shown are states the game
+    /// can really reach.
+    fn hurt_by(hearts: f32) -> Player {
+        let mut me = Player::spawn_at(Vec3::ZERO);
+        me.condition.hurt(hearts);
+        me
+    }
+
     /// Every item gets exactly one cell, and no row is wider than the d-pad's row step —
     /// otherwise pressing down skips a cell nobody can then reach in a straight line.
     #[test]
@@ -402,26 +419,42 @@ mod tests {
     /// being down says what is happening instead of showing an empty bar.
     #[test]
     fn the_health_bar_says_how_hurt_you_are() {
-        assert_eq!(body(Condition::WHOLE), "health [##########]");
-        assert_eq!(body(Condition::Well { health: 4.0 }), "health [####------]");
+        assert_eq!(health_bar(&hurt_by(0.0)), "health [##########]");
+        assert_eq!(health_bar(&hurt_by(6.0)), "health [####------]");
         assert_eq!(
-            body(Condition::Well { health: 0.1 }),
+            health_bar(&hurt_by(0.3)),
+            "health [#########-]",
+            "a fall you felt has to show on the bar"
+        );
+        assert_eq!(
+            health_bar(&hurt_by(player::MAX_HEALTH - 0.1)),
             "health [#---------]",
             "still standing, so still a heart"
         );
         assert_eq!(
-            body(Condition::Winded { left: 1.0 }),
+            health_bar(&hurt_by(player::MAX_HEALTH)),
             "winded - catching your breath"
         );
     }
 
     /// The status line shares the Deck's 1280px panel with nothing, but it is one line and
-    /// the health bar is new on it.
+    /// the health bar is new on it. Measured over every state it can be in, because the
+    /// longest is not the one anybody thinks of.
     #[test]
     fn the_status_line_fits_the_deck_panel() {
-        // 22px of bevy's default font advances well under 13px a character.
-        let line = format!("driving  |  4 player(s)  |  {}", body(Condition::WHOLE));
-        assert!(line.len() * 13 <= 1280, "{} chars: {line}", line.len());
+        for hearts in [0.0, 6.0, player::MAX_HEALTH] {
+            // 22px of bevy's default font advances well under 13px a character.
+            let line = status(&hurt_by(hearts), 4);
+            assert!(line.len() * 13 <= 1280, "{} chars: {line}", line.len());
+        }
+    }
+
+    /// A player flat on their back is not "walking", whatever their feet are doing: the two
+    /// halves of one line are read together and must not contradict each other.
+    #[test]
+    fn the_line_does_not_say_walking_while_you_are_down() {
+        let down = status(&hurt_by(player::MAX_HEALTH), 1);
+        assert!(down.starts_with("lying down"), "{down}");
     }
 
     /// Light cells get dark text, dark cells get light text. Sand is the case that bites:
