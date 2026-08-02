@@ -1,9 +1,11 @@
 //! Input: keyboard + mouse and gamepad, folded into one [`Intent`].
 //!
 //! The Steam Deck is the primary target, so the gamepad path is not a courtesy — it is
-//! the main one. Everything downstream reads [`Intent`] and never asks which device the
-//! player used, so remapping is a change to [`KEYS`] / [`PAD`] and nothing else.
+//! the main one, and every action including quitting is reachable without a keyboard.
+//! Everything downstream reads [`Intent`] and never asks which device the player used, so
+//! remapping is a change to [`KEYS`] / [`PAD`] and nothing else.
 
+use crate::registry::Item;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 
@@ -13,13 +15,11 @@ const MOUSE_SENSITIVITY: f32 = 0.0022;
 const STICK_LOOK_SPEED: f32 = 3.4;
 /// Sticks report small values at rest; below this they read as zero.
 const STICK_DEADZONE: f32 = 0.18;
-/// Analog triggers count as pressed past this.
-const TRIGGER_THRESHOLD: f32 = 0.5;
 /// Pitch stops just shy of straight up/down, where the camera basis degenerates.
 pub const PITCH_LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.01;
 const _: () = assert!(PITCH_LIMIT < std::f32::consts::FRAC_PI_2 && PITCH_LIMIT > 1.5);
 
-/// Keyboard bindings. One row per action — rebinding is a one-line diff.
+/// Keyboard and mouse bindings. One row per action — rebinding is a one-line diff.
 pub struct KeyBinds {
     pub forward: KeyCode,
     pub back: KeyCode,
@@ -30,6 +30,12 @@ pub struct KeyBinds {
     pub descend: KeyCode,
     pub toggle_fly: KeyCode,
     pub quit: KeyCode,
+    pub break_block: MouseButton,
+    pub place_block: MouseButton,
+    /// Picks a hotbar slot outright, slot 0 first. Only the first [`Item::count`] of
+    /// these do anything; the assertion below is what keeps a new hotbar slot from
+    /// quietly having no key.
+    pub slots: [KeyCode; 9],
 }
 
 pub const KEYS: KeyBinds = KeyBinds {
@@ -42,7 +48,25 @@ pub const KEYS: KeyBinds = KeyBinds {
     descend: KeyCode::ControlLeft,
     toggle_fly: KeyCode::KeyF,
     quit: KeyCode::Escape,
+    break_block: MouseButton::Left,
+    place_block: MouseButton::Right,
+    slots: [
+        KeyCode::Digit1,
+        KeyCode::Digit2,
+        KeyCode::Digit3,
+        KeyCode::Digit4,
+        KeyCode::Digit5,
+        KeyCode::Digit6,
+        KeyCode::Digit7,
+        KeyCode::Digit8,
+        KeyCode::Digit9,
+    ],
 };
+
+const _: () = assert!(
+    Item::count() <= KEYS.slots.len(),
+    "the number row has run out of keys for the hotbar"
+);
 
 /// Gamepad bindings, named for the Deck's face labels.
 pub struct PadBinds {
@@ -60,6 +84,10 @@ pub struct PadBinds {
     pub descend: GamepadButton,
     pub next_item: GamepadButton,
     pub prev_item: GamepadButton,
+    /// Held together to quit. A chord because quitting is instant and unconfirmed, and
+    /// these two are the only buttons no gameplay action uses — a thumb cannot land on
+    /// both mid-build.
+    pub quit: [GamepadButton; 2],
 }
 
 pub const PAD: PadBinds = PadBinds {
@@ -71,6 +99,7 @@ pub const PAD: PadBinds = PadBinds {
     descend: GamepadButton::LeftTrigger,
     next_item: GamepadButton::DPadRight,
     prev_item: GamepadButton::DPadLeft,
+    quit: [GamepadButton::Select, GamepadButton::Start],
 };
 
 /// What the player asked for this frame, device-independent.
@@ -121,22 +150,12 @@ pub fn gather_intent(
     out.sprint = keys.pressed(KEYS.sprint);
     out.vertical = keys.pressed(KEYS.jump) as i32 as f32 - keys.pressed(KEYS.descend) as i32 as f32;
     out.toggle_fly = keys.just_pressed(KEYS.toggle_fly);
-    out.break_block = mouse.just_pressed(MouseButton::Left);
-    out.place_block = mouse.just_pressed(MouseButton::Right);
+    out.break_block = mouse.just_pressed(KEYS.break_block);
+    out.place_block = mouse.just_pressed(KEYS.place_block);
     out.quit = keys.just_pressed(KEYS.quit);
-    for (i, key) in [
-        KeyCode::Digit1,
-        KeyCode::Digit2,
-        KeyCode::Digit3,
-        KeyCode::Digit4,
-        KeyCode::Digit5,
-        KeyCode::Digit6,
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        if keys.just_pressed(key) {
-            out.item_pick = Some(i);
+    for (slot, key) in KEYS.slots.iter().take(Item::count()).enumerate() {
+        if keys.just_pressed(*key) {
+            out.item_pick = Some(slot);
         }
     }
 
@@ -151,25 +170,20 @@ pub fn gather_intent(
             out.look += Vec2::new(-look.x, look.y) * STICK_LOOK_SPEED * dt;
         }
         out.jump |= pad.pressed(PAD.jump);
-        out.sprint |= pad.pressed(PAD.sprint) || trigger_held(pad, PAD.sprint);
-        out.vertical += pad.pressed(PAD.jump) as i32 as f32
-            - (pad.pressed(PAD.descend) || trigger_held(pad, PAD.descend)) as i32 as f32;
+        out.sprint |= pad.pressed(PAD.sprint);
+        out.vertical +=
+            pad.pressed(PAD.jump) as i32 as f32 - pad.pressed(PAD.descend) as i32 as f32;
         out.toggle_fly |= pad.just_pressed(PAD.toggle_fly);
         out.break_block |= pad.just_pressed(PAD.break_block);
         out.place_block |= pad.just_pressed(PAD.place_block);
         out.item_delta +=
             pad.just_pressed(PAD.next_item) as i32 - pad.just_pressed(PAD.prev_item) as i32;
+        out.quit |= PAD.quit.iter().all(|&b| pad.pressed(b));
     }
 
     out.walk = out.walk.clamp_length_max(1.0);
     out.vertical = out.vertical.clamp(-1.0, 1.0);
     *intent = out;
-}
-
-/// Analog shoulder triggers report a value rather than a press on some pads, so check
-/// both.
-fn trigger_held(pad: &Gamepad, button: GamepadButton) -> bool {
-    pad.get(button).is_some_and(|v| v >= TRIGGER_THRESHOLD)
 }
 
 #[cfg(test)]

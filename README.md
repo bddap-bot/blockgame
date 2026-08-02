@@ -41,7 +41,7 @@ joining player ignores their own seed and gets the host's world.
 | break block    | left click       | `R2`                 |
 | place block    | right click      | `L2`                 |
 | pick a block   | `1`–`6`          | d-pad left/right     |
-| quit           | `Esc`            | —                    |
+| quit           | `Esc`            | `Select` + `Start`   |
 
 You start in the air, flying. Press `F` to drop into walking.
 
@@ -57,7 +57,7 @@ Everyone in the world is this spaceman, drawn from
 
 | file                | what it owns                                                    |
 |---------------------|-----------------------------------------------------------------|
-| `src/registry.rs`   | **every block and item in the game** — start here to add content |
+| `src/registry.rs`   | **every block in the game** — start here to add content          |
 | `src/world.rs`      | chunk storage and seed-deterministic terrain                     |
 | `src/mesh.rs`       | turning voxels into geometry                                     |
 | `src/player.rs`     | movement and collision                                           |
@@ -80,12 +80,12 @@ travels is which block, and what it became.
 
 ## Adding things
 
-New block: one `Block` variant, one `BLOCKS` row, one `ITEMS` row. Nothing else — colour
-lives in the mesh, so there are no assets to make.
+New block: one `Block` variant, one arm in `Block::def`, and an entry in `PLACEABLE` if
+the player may place it. Nothing else — colour lives in the mesh, so there are no assets
+to make, and a variant with no arm fails to compile rather than crashing on first use.
 
-New non-block item (a tool, a vehicle, something wearable): one `Item` variant and one
-`ITEMS` row with the right `ItemKind`. The kinds are already there for what's been asked
-for; the behaviour behind them isn't yet.
+Something that is not a block — a tool, a vehicle, something wearable — has no home in
+the registry yet. It gets one when the behaviour that makes it worth holding does.
 
 ## Develop
 

@@ -233,8 +233,9 @@ mod tests {
             [Block::Stone as u8, 0, 0, 0],
             "block tag layout"
         );
-        // One past the last block this build knows: the off-by-one a newer peer would send.
-        bytes[id] = crate::registry::BLOCKS.len() as u8;
+        // One past the last block this build knows: the off-by-one a newer peer would
+        // send. Blocks are append-only, so the last variant declared is the highest id.
+        bytes[id] = Block::Bedrock as u8 + 1;
         assert!(decode(&bytes).is_err());
     }
 

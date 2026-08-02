@@ -6,7 +6,8 @@
 //! function is the single place to make greedy.
 //!
 //! Block colour rides in vertex colours, so the entire world draws with ONE material and
-//! adding a block type needs no asset work at all — just a [`crate::registry::BLOCKS`] row.
+//! adding a block type needs no asset work at all — just a colour in
+//! [`crate::registry::Block`].
 
 use crate::registry::Block;
 use crate::world::{BlockPos, CHUNK_SIZE, ChunkPos, WORLD_HEIGHT, World};

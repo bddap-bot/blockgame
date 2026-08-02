@@ -325,9 +325,7 @@ fn apply_intent(
     p.pos = pos;
     p.grounded = grounded && !p.flying;
 
-    if let Some(slot) = intent.item_pick
-        && slot < Item::count()
-    {
+    if let Some(slot) = intent.item_pick {
         held.0 = Item::from_slot(slot);
     }
     if intent.item_delta != 0 {
@@ -488,7 +486,7 @@ fn target_and_edit(
     let edit = if intent.break_block {
         Some((hit.block, Block::Air))
     } else if intent.place_block {
-        held.0.places().map(|block| (hit.adjacent(), block))
+        Some((hit.adjacent(), held.0.places()))
     } else {
         None
     };
