@@ -1,12 +1,13 @@
-//! Multiplayer transport: an iroh message bus that knows nothing about the game.
+//! Multiplayer transport: an iroh message bus that moves [`Msg`]s between endpoints.
 //!
 //! There is no single-player code path. `blockgame` with no arguments is a host with zero
-//! peers connected; `blockgame join <TICKET>` is a peer. The same systems run either way —
-//! see [`crate::game`] for the one place [`Role`] is consulted.
+//! peers connected; `blockgame join <TICKET>` is a peer. The same systems run either way.
 //!
-//! The bus itself is role-agnostic: it owns a set of links and moves [`Msg`]s over them.
-//! A host has N links, a peer has exactly one (to the host), and `Target::All` means the
-//! same thing to both.
+//! The bus owns a set of links. A host listens, so it has N links; a peer never listens,
+//! so it has exactly one — the host it dialled, named by [`Role::Peer`] — and `Target::All`
+//! means the same thing to both. That is the transport half of the trust boundary: a
+//! stranger cannot get a message *in* to a peer at all. The other half is
+//! [`crate::game::authorized`], which decides what a sender is entitled to say.
 
 pub mod wire;
 
@@ -29,17 +30,22 @@ pub const ALPN: &[u8] = b"bddap-bot/blockgame/1";
 
 /// How long a joining peer waits for the host's `Welcome` before giving up.
 const JOIN_TIMEOUT: Duration = Duration::from_secs(20);
-/// A peer that can't absorb a reliable frame in this long is treated as gone. Without it,
-/// one wedged connection would stall sends to everybody.
+/// A peer that can't absorb a reliable frame in this long is treated as gone. Outbound
+/// sends are serialized, so this is the *bound* on how long one wedged connection delays
+/// everybody else's traffic — not a promise that it delays nobody.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Which side of the host-authoritative relationship this process is on.
+///
+/// A peer carries the host's id rather than a bare marker: every peer-side trust decision
+/// is "is this the host?", and there is no moment in a peer's life when the answer is
+/// unknown — [`boot`] does not return until the host has answered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     /// Simulates the world and is the source of truth for every edit.
     Host,
     /// Sends intents, applies what the host says.
-    Peer,
+    Peer { host: PlayerId },
 }
 
 /// What the game loop sees coming off the wire.
@@ -142,9 +148,14 @@ pub fn boot(join: Option<PlayerId>, seed: u64) -> Result<Boot> {
         let me = endpoint.id();
 
         tokio::spawn(dispatch(bus.clone(), out_rx));
-        let router = Router::builder(endpoint.clone())
-            .accept(ALPN, Proto { bus: bus.clone() })
-            .spawn();
+        // Only a host listens. A peer that accepted connections would be a second,
+        // unauthenticated way into its world — and it has nothing to serve anyone.
+        let router = match join {
+            None => Router::builder(endpoint.clone())
+                .accept(ALPN, Proto { bus: bus.clone() })
+                .spawn(),
+            Some(_) => Router::builder(endpoint.clone()).spawn(),
+        };
 
         let (seed, edits) = match join {
             None => (seed, Vec::new()),
@@ -159,17 +170,16 @@ pub fn boot(join: Option<PlayerId>, seed: u64) -> Result<Boot> {
                         eprintln!("connection to host ended: {e:#}");
                     }
                 });
-                await_welcome(&mut inbox_rx).await?
+                await_welcome(&mut inbox_rx, host).await?
             }
         };
         anyhow::Ok((me, router, seed, edits))
     })?;
 
     Ok(Boot {
-        role: if join.is_some() {
-            Role::Peer
-        } else {
-            Role::Host
+        role: match join {
+            None => Role::Host,
+            Some(host) => Role::Peer { host },
         },
         seed,
         edits,
@@ -185,11 +195,14 @@ pub fn boot(join: Option<PlayerId>, seed: u64) -> Result<Boot> {
 
 async fn await_welcome(
     inbox: &mut mpsc::UnboundedReceiver<Event>,
+    host: PlayerId,
 ) -> Result<(u64, Vec<(BlockPos, Block)>)> {
     let wait = async {
         loop {
             match inbox.recv().await {
-                Some(Event::Message(_, Msg::Welcome { seed, edits })) => {
+                // Only the endpoint we dialled gets to say what world this is. Anyone
+                // else's `Welcome` would hand a stranger the seed and the whole edit log.
+                Some(Event::Message(from, Msg::Welcome { seed, edits })) if from == host => {
                     return Ok((seed, edits));
                 }
                 // Anything else this early is pre-handshake chatter; the world isn't

@@ -127,6 +127,13 @@ impl Block {
         self.def().color
     }
 
+    /// Can a player put this voxel in the world at all? Derived from [`ITEMS`] so the
+    /// registry stays the one seam — the host's edit rules ask this instead of keeping a
+    /// second list that would drift from the table.
+    pub fn placeable(self) -> bool {
+        ITEMS.iter().any(|d| d.kind == ItemKind::Place(self))
+    }
+
     /// Wire decode. `None` for an id this build doesn't know, so a peer on a newer build
     /// can't inject an out-of-range index into the world array.
     pub fn from_id(id: u8) -> Option<Block> {

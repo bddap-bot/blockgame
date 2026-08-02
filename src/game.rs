@@ -1,10 +1,10 @@
 //! The Bevy app: one set of systems that runs identically whether you are hosting or
 //! joining.
 //!
-//! [`Role`] is consulted in exactly two places — [`submit_edit`] (who may change the
-//! world) and [`net_receive`] (who relays). Everything else is role-blind, which is what
-//! "single player is multiplayer with zero peers" has to mean if it is going to stay
-//! true.
+//! [`Role`] is consulted only where authority differs: [`authorized`] (whose word counts),
+//! [`submit_edit`] (who may change the world), [`net_receive`] (who relays), and the
+//! status line. Everything else is role-blind, which is what "single player is
+//! multiplayer with zero peers" has to mean if it is going to stay true.
 
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
@@ -32,6 +32,10 @@ const UNLOAD_RADIUS: i32 = VIEW_RADIUS + 2;
 const _: () = assert!(UNLOAD_RADIUS > VIEW_RADIUS);
 /// How far the player can reach to break or place, in blocks.
 const REACH: f32 = 6.0;
+/// Slack the host allows on [`REACH`] when checking a peer's edit. The host checks
+/// against the pose that peer last sent, which is up to a round trip old; without the
+/// slack a peer editing while sprinting would have legitimate edits refused.
+const REACH_LAG: f32 = 1.5;
 
 const SKY: Color = Color::srgb(0.52, 0.72, 0.95);
 
@@ -55,8 +59,17 @@ struct Chunks {
 #[derive(Resource)]
 struct WorldMaterial(Handle<StandardMaterial>);
 
+/// Everyone else in this world. Their position is game state, not just something to draw:
+/// the host checks each peer's edits against where that peer last said it was.
 #[derive(Resource, Default)]
-struct Avatars(HashMap<PlayerId, Entity>);
+struct Peers(HashMap<PlayerId, PeerState>);
+
+struct PeerState {
+    /// Feet position from this player's most recent [`Msg::Pose`].
+    pos: Vec3,
+    /// The model drawing them.
+    avatar: Entity,
+}
 
 #[derive(Component)]
 struct ChunkTag;
@@ -102,7 +115,7 @@ pub fn run(boot: Boot) -> anyhow::Result<()> {
     .init_resource::<Intent>()
     .init_resource::<Held>()
     .init_resource::<Chunks>()
-    .init_resource::<Avatars>()
+    .init_resource::<Peers>()
     .insert_non_send_resource(session)
     .add_systems(Startup, setup)
     .add_systems(
@@ -293,38 +306,99 @@ fn apply_intent(
     }
 }
 
-/// Does a block at `pos` overlap the player's box? Placing there would trap them inside
-/// the world.
-fn would_trap(p: &Player, pos: BlockPos) -> bool {
-    let min = p.pos - Vec3::new(player::HALF_WIDTH, 0.0, player::HALF_WIDTH);
-    let max = p.pos + Vec3::new(player::HALF_WIDTH, player::HEIGHT, player::HALF_WIDTH);
+/// Does a block at `pos` overlap the box of a player standing at `actor`? Placing there
+/// would trap them inside the world.
+fn would_trap(actor: Vec3, pos: BlockPos) -> bool {
+    let min = actor - Vec3::new(player::HALF_WIDTH, 0.0, player::HALF_WIDTH);
+    let max = actor + Vec3::new(player::HALF_WIDTH, player::HEIGHT, player::HALF_WIDTH);
     let b = pos.corner();
     (min.x < b.x + 1.0 && max.x > b.x)
         && (min.y < b.y + 1.0 && max.y > b.y)
         && (min.z < b.z + 1.0 && max.z > b.z)
 }
 
-/// The ONE place a block change enters the game, from local input or from the wire.
+/// Is the block within arm's length of a player standing at `actor`? Measured eye to
+/// nearest point of the block, which is the same thing the client's raycast bounds.
+fn within_reach(actor: Vec3, pos: BlockPos) -> bool {
+    let eye = actor + Vec3::Y * player::EYE_HEIGHT;
+    let corner = pos.corner();
+    eye.distance(eye.clamp(corner, corner + Vec3::ONE)) <= REACH + REACH_LAG
+}
+
+/// Every rule an edit must satisfy, in one place, applied by the host to its own player
+/// and to every peer alike.
 ///
-/// The host is authoritative: it applies and announces. A peer only asks — it does not
-/// touch its own world, so what it sees is always what the host said, never a local
-/// guess that has to be rolled back.
-fn submit_edit(
-    role: Role,
-    session: &Session,
+/// This is what makes host-authoritative *real*: none of it is taken on the asker's
+/// word, so a modified client can ask for anything and still cannot break bedrock, reach
+/// across the map, overwrite a block that is already there, or wall a player in.
+fn edit_is_legal(world: &World, actor: Vec3, pos: BlockPos, block: Block) -> bool {
+    if !within_reach(actor, pos) {
+        return false;
+    }
+    match block {
+        // Breaking. Bedrock is the floor of the world; breaking it drops you out of it.
+        Block::Air => world.block(pos) != Block::Bedrock,
+        // Placing: only a voxel some item actually places, only into empty space, and
+        // never inside the player doing it.
+        _ => block.placeable() && world.block(pos) == Block::Air && !would_trap(actor, pos),
+    }
+}
+
+/// The host's half of an edit: apply a request if the rules allow it, and say whether
+/// the world changed — which is exactly when the host announces it.
+fn apply_if_legal(
     sim: &mut World,
     chunks: &mut Chunks,
+    actor: Vec3,
     pos: BlockPos,
     block: Block,
-) {
-    match role {
-        Role::Host => {
-            if sim.set_block(pos, block) {
-                mark_dirty(chunks, pos);
+) -> bool {
+    if !edit_is_legal(sim, actor, pos, block) || !sim.set_block(pos, block) {
+        return false;
+    }
+    mark_dirty(chunks, pos);
+    true
+}
+
+/// A block change on its way into the world.
+enum Edit {
+    /// Somebody wants this change — the local player, or a peer over the wire. `actor` is
+    /// that player's feet, and every rule is checked against it.
+    Request {
+        actor: Vec3,
+        pos: BlockPos,
+        block: Block,
+    },
+    /// The host says this happened. Only a peer ever receives one, and it is not a
+    /// request: the host has already checked it.
+    Announcement { pos: BlockPos, block: Block },
+}
+
+/// The ONE place a block change enters the game, from local input or from the wire.
+///
+/// The host is authoritative: it checks every request against [`edit_is_legal`], applies
+/// it, and announces it. A peer only asks — it does not touch its own world, so what it
+/// sees is always what the host said, never a local guess that has to be rolled back.
+fn submit_edit(role: Role, session: &Session, sim: &mut World, chunks: &mut Chunks, edit: Edit) {
+    match (role, edit) {
+        (Role::Host, Edit::Request { actor, pos, block }) => {
+            if apply_if_legal(sim, chunks, actor, pos, block) {
                 session.send(Target::All, Msg::Edit { pos, block });
             }
         }
-        Role::Peer => session.send(Target::All, Msg::Edit { pos, block }),
+        (Role::Peer { .. }, Edit::Request { pos, block, .. }) => {
+            session.send(Target::All, Msg::Edit { pos, block })
+        }
+        (Role::Peer { .. }, Edit::Announcement { pos, block }) => {
+            if sim.set_block(pos, block) {
+                mark_dirty(chunks, pos);
+            }
+        }
+        // `net_receive` builds an announcement only when this process is a peer, and a
+        // host has no other host to hear one from.
+        (Role::Host, Edit::Announcement { .. }) => {
+            unreachable!("the host is the only announcer")
+        }
     }
 }
 
@@ -373,20 +447,40 @@ fn target_and_edit(
 
     let Some(hit) = hit else { return };
 
+    // What the button asks for. Whether it is allowed is the host's call, not this
+    // client's — see `edit_is_legal`.
     let edit = if intent.break_block {
-        // Bedrock is the floor of the world; breaking it drops you out of it.
-        (sim.0.block(hit.block) != Block::Bedrock).then_some((hit.block, Block::Air))
+        Some((hit.block, Block::Air))
     } else if intent.place_block {
-        held.0.places().and_then(|block| {
-            let pos = hit.adjacent();
-            (!would_trap(&me.0, pos)).then_some((pos, block))
-        })
+        held.0.places().map(|block| (hit.adjacent(), block))
     } else {
         None
     };
 
     if let Some((pos, block)) = edit {
-        submit_edit(role.0, &session, &mut sim.0, &mut chunks, pos, block);
+        let request = Edit::Request {
+            actor: me.0.pos,
+            pos,
+            block,
+        };
+        submit_edit(role.0, &session, &mut sim.0, &mut chunks, request);
+    }
+}
+
+/// Is `from` entitled to say this? The whole trust boundary, in one pure function.
+///
+/// A peer has exactly one link — to the host — so it believes that endpoint and nobody
+/// else. The host talks to many peers, and a peer may only ever speak for itself: ask for
+/// an edit, report its own pose, say hello. Everything else is the host's word, and a
+/// peer sending one is claiming to be the host.
+fn authorized(role: Role, from: PlayerId, msg: &Msg) -> bool {
+    match role {
+        Role::Peer { host } => from == host,
+        Role::Host => match msg {
+            Msg::Welcome { .. } | Msg::PeerLeft { .. } => false,
+            Msg::Pose { id, .. } => *id == from,
+            Msg::Hello | Msg::Edit { .. } => true,
+        },
     }
 }
 
@@ -396,92 +490,115 @@ fn net_receive(
     mut session: NonSendMut<Session>,
     mut sim: ResMut<Sim>,
     mut chunks: ResMut<Chunks>,
-    mut avatars: ResMut<Avatars>,
+    mut peers: ResMut<Peers>,
     palette: Res<avatar::Palette>,
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
 ) {
     let me = session.me();
-    let host = role.0 == Role::Host;
 
     for event in session.drain() {
         match event {
-            Event::Message(from, Msg::Hello) if host => {
-                session.send(
-                    Target::One(from),
-                    Msg::Welcome {
-                        seed: sim.0.seed(),
-                        edits: sim.0.edit_log(),
-                    },
-                );
-            }
-            Event::Message(_, Msg::Edit { pos, block }) => {
-                if host {
-                    // A peer's edit is an intent; applying it here is what makes it real,
-                    // and the same call broadcasts it to everybody including the asker.
-                    submit_edit(Role::Host, &session, &mut sim.0, &mut chunks, pos, block);
-                } else if sim.0.set_block(pos, block) {
-                    mark_dirty(&mut chunks, pos);
-                }
-            }
-            Event::Message(from, Msg::Pose { id, pose }) => {
-                // A peer may only speak for itself; the host is the only relay.
-                if host && id != from {
+            Event::Message(from, msg) => {
+                if !authorized(role.0, from, &msg) {
                     continue;
                 }
-                if host {
-                    session.send(Target::All, Msg::Pose { id, pose });
-                }
-                if id != me {
-                    place_avatar(&mut commands, &mut avatars, &palette, id, pose);
+                match msg {
+                    // Only a host is ever asked for a world; a peer has none to give.
+                    Msg::Hello => {
+                        if role.0 == Role::Host {
+                            session.send(
+                                Target::One(from),
+                                Msg::Welcome {
+                                    seed: sim.0.seed(),
+                                    edits: sim.0.edit_log(),
+                                },
+                            );
+                        }
+                    }
+                    Msg::Edit { pos, block } => {
+                        let edit = match role.0 {
+                            // A peer's edit is a request, checked against where that peer
+                            // last said it was standing.
+                            Role::Host => match peers.0.get(&from) {
+                                Some(p) => Edit::Request {
+                                    actor: p.pos,
+                                    pos,
+                                    block,
+                                },
+                                // Nobody has said where they are yet, so nothing of
+                                // theirs can be checked. Their next pose is a frame away.
+                                None => continue,
+                            },
+                            // `authorized` proved this came from the host, and the host
+                            // is the truth.
+                            Role::Peer { .. } => Edit::Announcement { pos, block },
+                        };
+                        submit_edit(role.0, &session, &mut sim.0, &mut chunks, edit);
+                    }
+                    Msg::Pose { id, pose } => {
+                        // The host is the only relay.
+                        if role.0 == Role::Host {
+                            session.send(Target::All, Msg::Pose { id, pose });
+                        }
+                        if id != me {
+                            track_peer(&mut commands, &mut peers, &palette, id, pose);
+                        }
+                    }
+                    Msg::PeerLeft { id } => forget_peer(&mut commands, &mut peers, id),
+                    // The handshake already happened in `net::boot`, so a second Welcome
+                    // has nothing left to do.
+                    Msg::Welcome { .. } => {}
                 }
             }
-            Event::Message(_, Msg::PeerLeft { id }) => {
-                despawn_avatar(&mut commands, &mut avatars, id);
-            }
-            Event::Left(id) => {
-                if host {
+            Event::Left(id) => match role.0 {
+                Role::Host => {
                     session.send(Target::All, Msg::PeerLeft { id });
-                    despawn_avatar(&mut commands, &mut avatars, id);
-                } else {
-                    eprintln!("host disconnected");
-                    exit.write(AppExit::Success);
+                    forget_peer(&mut commands, &mut peers, id);
                 }
-            }
-            // A second Welcome, or Hello as a peer: the handshake already happened in
-            // `net::boot`, so there is nothing left to do with it.
-            Event::Message(_, Msg::Welcome { .. } | Msg::Hello) => {}
+                // A peer only ever links to the host, but a departure that is not the
+                // host's must never end somebody's game.
+                Role::Peer { host } => {
+                    if id == host {
+                        eprintln!("host disconnected");
+                        exit.write(AppExit::Success);
+                    }
+                }
+            },
         }
     }
 }
 
-fn place_avatar(
+/// Records where a player is and keeps their model there, spawning it the first time.
+fn track_peer(
     commands: &mut Commands,
-    avatars: &mut Avatars,
+    peers: &mut Peers,
     palette: &avatar::Palette,
     id: PlayerId,
     pose: Pose,
 ) {
     // A pose is the player's feet, which is also the model's origin — see `avatar`.
+    let pos = Vec3::from(pose.pos);
     let transform = Transform {
-        translation: Vec3::from(pose.pos),
+        translation: pos,
         rotation: Quat::from_rotation_y(pose.yaw),
         ..default()
     };
-    match avatars.0.get(&id) {
-        Some(e) => {
-            commands.entity(*e).insert(transform);
+    match peers.0.get_mut(&id) {
+        Some(p) => {
+            p.pos = pos;
+            commands.entity(p.avatar).insert(transform);
         }
         None => {
-            let e = avatar::spawn(commands, palette, transform);
-            avatars.0.insert(id, e);
+            let avatar = avatar::spawn(commands, palette, transform);
+            peers.0.insert(id, PeerState { pos, avatar });
         }
     }
 }
 
-fn despawn_avatar(commands: &mut Commands, avatars: &mut Avatars, id: PlayerId) {
-    if let Some(e) = avatars.0.remove(&id) {
-        commands.entity(e).despawn();
+fn forget_peer(commands: &mut Commands, peers: &mut Peers, id: PlayerId) {
+    if let Some(p) = peers.0.remove(&id) {
+        commands.entity(p.avatar).despawn();
     }
 }
 
@@ -503,6 +620,31 @@ fn chebyshev(a: ChunkPos, b: ChunkPos) -> i32 {
     (a.x - b.x).abs().max((a.z - b.z).abs())
 }
 
+/// Chunks the player is close enough to want loaded, nearest first — so the world fills
+/// in around them rather than in scan order.
+fn wanted_chunks(center: ChunkPos) -> Vec<ChunkPos> {
+    let mut wanted: Vec<ChunkPos> = Vec::new();
+    for dz in -(VIEW_RADIUS + 1)..=(VIEW_RADIUS + 1) {
+        for dx in -(VIEW_RADIUS + 1)..=(VIEW_RADIUS + 1) {
+            wanted.push(ChunkPos::new(center.x + dx, center.z + dz));
+        }
+    }
+    wanted.sort_by_key(|c| (c.x - center.x).pow(2) + (c.z - center.z).pow(2));
+    wanted
+}
+
+/// Loaded chunks the player has walked away from.
+///
+/// Read from the world's own loaded set, never from the chunk entities: the load ring
+/// reaches a chunk further than the mesh ring, and a chunk can be loaded long before it
+/// is meshed, so anything driven by entities leaks every chunk that never got one.
+fn stale_chunks(world: &World, center: ChunkPos) -> Vec<ChunkPos> {
+    world
+        .loaded_chunks()
+        .filter(|c| chebyshev(*c, center) > UNLOAD_RADIUS)
+        .collect()
+}
+
 fn stream_chunks(
     me: Res<Me>,
     material: Res<WorldMaterial>,
@@ -513,27 +655,14 @@ fn stream_chunks(
 ) {
     let center = BlockPos::containing(me.0.pos).chunk();
 
-    let gone: Vec<ChunkPos> = chunks
-        .entities
-        .keys()
-        .copied()
-        .filter(|c| chebyshev(*c, center) > UNLOAD_RADIUS)
-        .collect();
-    for cp in gone {
+    for cp in stale_chunks(&sim.0, center) {
         if let Some(e) = chunks.entities.remove(&cp) {
             commands.entity(e).despawn();
         }
         sim.0.unload_chunk(cp);
     }
 
-    // Nearest first, so the world fills in around the player rather than in scan order.
-    let mut wanted: Vec<ChunkPos> = Vec::new();
-    for dz in -(VIEW_RADIUS + 1)..=(VIEW_RADIUS + 1) {
-        for dx in -(VIEW_RADIUS + 1)..=(VIEW_RADIUS + 1) {
-            wanted.push(ChunkPos::new(center.x + dx, center.z + dz));
-        }
-    }
-    wanted.sort_by_key(|c| (c.x - center.x).pow(2) + (c.z - center.z).pow(2));
+    let wanted = wanted_chunks(center);
 
     let mut generated = 0;
     for cp in &wanted {
@@ -633,7 +762,7 @@ fn update_status(
     me: Res<Me>,
     role: Res<NetRole>,
     session: NonSend<Session>,
-    avatars: Res<Avatars>,
+    peers: Res<Peers>,
     mut text: Query<&mut Text, With<StatusText>>,
 ) {
     let Ok(mut text) = text.single_mut() else {
@@ -644,14 +773,14 @@ fn update_status(
     // on the Deck's 1280px panel.
     let who = match role.0 {
         Role::Host => format!("join ticket:  {}", session.ticket()),
-        Role::Peer => "in a friend's world".to_string(),
+        Role::Peer { .. } => "in a friend's world".to_string(),
     };
     // ASCII only: bevy's built-in font has no glyph for a middle dot, and a missing glyph
     // draws as a tofu box.
     text.0 = format!(
         "{mode}  |  holding {}  |  {} player(s)\n{who}",
         held.0.name(),
-        avatars.0.len() + 1,
+        peers.0.len() + 1,
     );
 }
 
@@ -688,14 +817,207 @@ mod tests {
 
     #[test]
     fn placing_a_block_inside_yourself_is_refused() {
-        let p = Player::spawn_at(Vec3::new(8.5, 10.0, 8.5));
-        assert!(would_trap(&p, BlockPos::new(8, 10, 8)), "feet");
-        assert!(would_trap(&p, BlockPos::new(8, 11, 8)), "head");
-        assert!(!would_trap(&p, BlockPos::new(8, 9, 8)), "the floor is fine");
+        let feet = Vec3::new(8.5, 10.0, 8.5);
+        assert!(would_trap(feet, BlockPos::new(8, 10, 8)), "feet");
+        assert!(would_trap(feet, BlockPos::new(8, 11, 8)), "head");
         assert!(
-            !would_trap(&p, BlockPos::new(8, 12, 8)),
+            !would_trap(feet, BlockPos::new(8, 9, 8)),
+            "the floor is fine"
+        );
+        assert!(
+            !would_trap(feet, BlockPos::new(8, 12, 8)),
             "above the head is fine"
         );
-        assert!(!would_trap(&p, BlockPos::new(7, 10, 8)), "beside is fine");
+        assert!(!would_trap(feet, BlockPos::new(7, 10, 8)), "beside is fine");
+    }
+
+    /// A deterministic stand-in player id. Ids are public keys, so distinct seed bytes
+    /// give distinct ids.
+    fn id(n: u8) -> PlayerId {
+        iroh::SecretKey::from_bytes(&[n; 32]).public()
+    }
+
+    /// A world with one chunk loaded, plus a spot to stand and the block under it.
+    fn standing_in_a_loaded_world() -> (World, Chunks, Vec3, BlockPos) {
+        let mut world = World::new(4, []);
+        world.load_chunk(ChunkPos::new(0, 0));
+        let ground = world.ground_height(8, 8);
+        let feet = Vec3::new(8.5, ground as f32 + 1.0, 8.5);
+        (world, Chunks::default(), feet, BlockPos::new(8, ground, 8))
+    }
+
+    /// The point of host authority: the host runs the rules itself, so a client that
+    /// simply asks for a forbidden edit gets nothing. Bedrock is the sharpest case —
+    /// breaking it drops everybody out of the world.
+    #[test]
+    fn a_modified_client_cannot_delete_bedrock() {
+        let (mut world, mut chunks, surface_feet, surface) = standing_in_a_loaded_world();
+        let floor = BlockPos::new(8, 0, 8);
+        assert_eq!(world.block(floor), Block::Bedrock);
+
+        // Standing on the bedrock, so reach cannot be what refuses this.
+        let feet = Vec3::new(8.5, 1.0, 8.5);
+        assert!(!apply_if_legal(
+            &mut world,
+            &mut chunks,
+            feet,
+            floor,
+            Block::Air
+        ));
+        assert_eq!(world.block(floor), Block::Bedrock, "bedrock survived");
+        assert!(chunks.dirty.is_empty(), "a refused edit dirties nothing");
+
+        // ... and placing bedrock is refused too: no item places it.
+        let air = BlockPos::new(7, surface.y + 1, 8);
+        assert_eq!(world.block(air), Block::Air);
+        assert!(!apply_if_legal(
+            &mut world,
+            &mut chunks,
+            surface_feet,
+            air,
+            Block::Bedrock
+        ));
+        assert_eq!(world.block(air), Block::Air);
+    }
+
+    #[test]
+    fn the_host_applies_a_legal_edit() {
+        let (mut world, mut chunks, feet, surface) = standing_in_a_loaded_world();
+        assert!(apply_if_legal(
+            &mut world,
+            &mut chunks,
+            feet,
+            surface,
+            Block::Air
+        ));
+        assert_eq!(world.block(surface), Block::Air);
+        assert!(chunks.dirty.contains(&surface.chunk()));
+    }
+
+    #[test]
+    fn an_edit_out_of_reach_is_refused() {
+        let (mut world, mut chunks, feet, _) = standing_in_a_loaded_world();
+        // The far corner of the same chunk: ~10 blocks away, well past REACH.
+        let far = BlockPos::new(0, world.ground_height(0, 0), 0);
+        assert!(world.solid(far), "the test needs a real block over there");
+        assert!(!within_reach(feet, far));
+        assert!(!apply_if_legal(
+            &mut world,
+            &mut chunks,
+            feet,
+            far,
+            Block::Air
+        ));
+        assert!(world.solid(far), "an unreachable block is untouched");
+    }
+
+    #[test]
+    fn a_block_may_only_be_placed_into_empty_space() {
+        let (mut world, mut chunks, feet, surface) = standing_in_a_loaded_world();
+        assert!(
+            !apply_if_legal(&mut world, &mut chunks, feet, surface, Block::Stone),
+            "the ground is already occupied"
+        );
+        assert_ne!(world.block(surface), Block::Stone);
+
+        let inside_me = BlockPos::containing(feet);
+        assert!(
+            !apply_if_legal(&mut world, &mut chunks, feet, inside_me, Block::Stone),
+            "nobody may be walled into the world"
+        );
+
+        let beside_me = BlockPos::new(7, surface.y + 1, 8);
+        assert_eq!(world.block(beside_me), Block::Air);
+        assert!(apply_if_legal(
+            &mut world,
+            &mut chunks,
+            feet,
+            beside_me,
+            Block::Stone
+        ));
+        assert_eq!(world.block(beside_me), Block::Stone);
+    }
+
+    /// A peer's world is built entirely from what the host says, so it must believe the
+    /// host and nobody else — including for edits, which is what a stranger would use to
+    /// rewrite somebody's blocks.
+    #[test]
+    fn a_peer_believes_only_the_host() {
+        let (host, stranger) = (id(1), id(2));
+        let role = Role::Peer { host };
+        let edit = Msg::Edit {
+            pos: BlockPos::new(0, 40, 0),
+            block: Block::Stone,
+        };
+        assert!(authorized(role, host, &edit));
+        assert!(!authorized(role, stranger, &edit));
+
+        let pose = Msg::Pose {
+            id: stranger,
+            pose: Pose {
+                pos: [0.0; 3],
+                yaw: 0.0,
+                pitch: 0.0,
+            },
+        };
+        assert!(!authorized(role, stranger, &pose), "not the host");
+        assert!(
+            authorized(role, host, &pose),
+            "the host relays everyone's pose"
+        );
+    }
+
+    /// On the host, a peer speaks for itself and nothing more: it may not pose as another
+    /// player, nor issue the host's own announcements.
+    #[test]
+    fn a_host_lets_a_peer_speak_only_for_itself() {
+        let (peer, other) = (id(3), id(4));
+        let pose = |id| Msg::Pose {
+            id,
+            pose: Pose {
+                pos: [0.0; 3],
+                yaw: 0.0,
+                pitch: 0.0,
+            },
+        };
+        assert!(authorized(Role::Host, peer, &pose(peer)));
+        assert!(!authorized(Role::Host, peer, &pose(other)), "spoofed pose");
+        assert!(!authorized(Role::Host, peer, &Msg::PeerLeft { id: other }));
+        assert!(!authorized(
+            Role::Host,
+            peer,
+            &Msg::Welcome {
+                seed: 0,
+                edits: Vec::new()
+            }
+        ));
+    }
+
+    /// Walking in a straight line must not accumulate chunks. Unloading is driven from
+    /// the world's loaded set for exactly this reason: chunks in the outer load ring
+    /// never get an entity, so the render side cannot see — or free — them.
+    #[test]
+    fn walking_a_line_does_not_leak_chunks() {
+        let mut world = World::new(11, []);
+        let resident = ((2 * UNLOAD_RADIUS + 1) * (2 * UNLOAD_RADIUS + 1)) as usize;
+
+        for step in 0..25 {
+            let center = ChunkPos::new(step, 0);
+            for cp in stale_chunks(&world, center) {
+                world.unload_chunk(cp);
+            }
+            for cp in wanted_chunks(center) {
+                world.load_chunk(cp);
+            }
+            let loaded = world.loaded_chunks().count();
+            assert!(
+                loaded <= resident,
+                "step {step}: {loaded} chunks loaded, more than the {resident} in range"
+            );
+        }
+        assert!(
+            !world.is_loaded(ChunkPos::new(0, 0)),
+            "the chunk walked away from is gone"
+        );
     }
 }

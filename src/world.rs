@@ -97,8 +97,9 @@ impl Chunk {
 
 /// The whole world: loaded chunks plus the authoritative edit log.
 ///
-/// The edit log is the *only* state multiplayer replicates. A late joiner gets
-/// `(seed, edits)` and reconstructs everything.
+/// The edit log is the only *world* state multiplayer replicates — player poses travel
+/// too, but they are not the world. A late joiner gets `(seed, edits)` and reconstructs
+/// every block.
 pub struct World {
     seed: u64,
     chunks: HashMap<ChunkPos, Chunk>,
@@ -125,6 +126,13 @@ impl World {
 
     pub fn is_loaded(&self, cp: ChunkPos) -> bool {
         self.chunks.contains_key(&cp)
+    }
+
+    /// Every chunk currently in memory. This is the set unloading must be driven from:
+    /// a chunk can be generated and never drawn, so the render side does not know them
+    /// all.
+    pub fn loaded_chunks(&self) -> impl Iterator<Item = ChunkPos> + '_ {
+        self.chunks.keys().copied()
     }
 
     pub fn chunk(&self, cp: ChunkPos) -> Option<&Chunk> {
@@ -181,6 +189,10 @@ impl World {
 
     /// The one block-mutation path: local edits and replicated edits both land here.
     ///
+    /// Bounds are all this enforces. Whether an edit is *allowed* — reach, bedrock,
+    /// what may be placed where — is the host's call, made once in
+    /// `game::edit_is_legal` before anything reaches this far.
+    ///
     /// Returns `false` for an out-of-bounds write (a malformed or hostile peer message),
     /// which the caller drops rather than replicating.
     pub fn set_block(&mut self, pos: BlockPos, block: Block) -> bool {
@@ -199,8 +211,8 @@ impl World {
         true
     }
 
-    /// Y of the highest solid block in a column of *generated* terrain, ignoring edits —
-    /// used to pick a spawn point before any chunk is loaded.
+    /// Y of a column's terrain surface — ignoring edits, and ignoring anything standing
+    /// on it such as a tree. Used to pick a spawn point before any chunk is loaded.
     pub fn ground_height(&self, x: i32, z: i32) -> i32 {
         terrain_height(self.seed, x, z)
     }
@@ -286,7 +298,9 @@ fn tree_here(seed: u64, x: i32, z: i32) -> Option<i32> {
     if r % 1000 >= 7 {
         return None;
     }
-    Some(4 + (r >> 8) as i32 % 3)
+    // Modulo in u64 and cast after: `(r >> 8) as i32` is negative for half of all hashes,
+    // and Rust's `%` keeps the dividend's sign, which grew trunks of 2 and 3.
+    Some(4 + ((r >> 8) % 3) as i32)
 }
 
 fn generate_chunk(seed: u64, cp: ChunkPos) -> Chunk {
@@ -388,6 +402,26 @@ mod tests {
             (0..64).map(|x| terrain_height(1, x, 0)).collect::<Vec<_>>(),
             (0..64).map(|x| terrain_height(2, x, 0)).collect::<Vec<_>>(),
             "different seeds should give different terrain"
+        );
+    }
+
+    /// Trunks are 4, 5 or 6 blocks. A signed-modulo bug once let the hash produce 2 and 3
+    /// as well, and a 2-block "tree" is a bush the player walks into.
+    #[test]
+    fn tree_trunks_are_four_to_six_blocks() {
+        let mut seen = [0usize; 3];
+        for z in -200..200 {
+            for x in -200..200 {
+                let Some(trunk) = tree_here(9, x, z) else {
+                    continue;
+                };
+                assert!((4..=6).contains(&trunk), "trunk {trunk} at ({x},{z})");
+                seen[(trunk - 4) as usize] += 1;
+            }
+        }
+        assert!(
+            seen.iter().all(|&n| n > 0),
+            "every trunk height should occur: {seen:?}"
         );
     }
 
