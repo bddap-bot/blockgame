@@ -14,14 +14,15 @@ use serde::{Deserialize, Serialize};
 /// join ticket.
 pub type PlayerId = iroh::EndpointId;
 
-/// Where a player is, which way they are facing, and what is in their hand. Sent
-/// continuously, over unreliable datagrams — a lost pose is superseded by the next one a
-/// frame later.
+/// Where a player is, which way they are facing, what is in their hand, and where their
+/// car is. Sent continuously, over unreliable datagrams — a lost pose is superseded by the
+/// next one a frame later.
 ///
-/// The held item rides here rather than in a message of its own precisely because this
-/// stream is continuous and loss-tolerant: it is the same kind of fact — how a player
-/// looks right now — and a dedicated message would need change-detection and a resend to
-/// say the same thing less reliably.
+/// The held item and the car ride here rather than in messages of their own precisely
+/// because this stream is continuous and loss-tolerant: they are the same kind of fact —
+/// how a player looks right now — and a dedicated message would need change-detection and
+/// a resend to say the same thing less reliably. It also bounds the cars: a player has at
+/// most one, so the world can never hold more of them than there are people in it.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Pose {
     pub pos: [f32; 3],
@@ -31,6 +32,20 @@ pub struct Pose {
     /// none of the item they have selected has. Cosmetic: the host checks what an edit
     /// costs against the inventory it keeps, never against this.
     pub held: Option<Item>,
+    /// Their car, if they have one out. `None` is a car in the pocket or no car at all —
+    /// nothing to draw either way. The host clears it for anybody who does not own a
+    /// [`Item::Car`], which is the one half of a car it can actually check.
+    pub car: Option<CarPose>,
+}
+
+/// Where somebody's car is. Its driver simulates it and the host relays it, exactly as it
+/// relays where their feet are — and the driver's feet are inside the host's travel budget
+/// the whole time they are in it, so a car is no way to move faster than the host allows.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CarPose {
+    /// The middle of its underside, as [`crate::vehicle::Car::pos`].
+    pub pos: [f32; 3],
+    pub yaw: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -164,6 +179,10 @@ mod tests {
             yaw: 0.25,
             pitch: -0.5,
             held: Some(Item::Hammer),
+            car: Some(CarPose {
+                pos: [4.0, 33.0, -9.0],
+                yaw: 1.5,
+            }),
         }
     }
 
@@ -203,19 +222,24 @@ mod tests {
         all
     }
 
-    /// Every pose a player can send: one per thing they could be holding, plus an empty
-    /// hand. The held item is the only part of a pose that varies in size, and it varies
-    /// over a list this file can enumerate — which is what keeps the datagram bound below
-    /// a fact about the protocol rather than a sample of one.
+    /// Every pose a player can send: one per thing they could be holding, with and without
+    /// a car, plus an empty hand. Those two are the only parts of a pose that vary in size,
+    /// and both vary over lists this file can enumerate — which is what keeps the datagram
+    /// bound a fact about the protocol rather than a sample of one.
     fn every_pose() -> Vec<Msg> {
         let id = some_id();
-        std::iter::once(None)
-            .chain(Item::ALL.iter().copied().map(Some))
-            .map(|held| Msg::Pose {
+        let held = std::iter::once(None).chain(Item::ALL.iter().copied().map(Some));
+        held.flat_map(|held| {
+            [None, pose().car].map(|car| Msg::Pose {
                 id,
-                pose: Pose { held, ..pose() },
+                pose: Pose {
+                    held,
+                    car,
+                    ..pose()
+                },
             })
-            .collect()
+        })
+        .collect()
     }
 
     #[test]

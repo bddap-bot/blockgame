@@ -6,6 +6,7 @@
 //! [`World`], so it is unit-testable without a window; `game::apply_intent` is what drives
 //! it each frame, and what turns input into the `delta` handed to [`move_and_slide`].
 
+use crate::vehicle::Ride;
 use crate::world::{BlockPos, WORLD_HEIGHT, World};
 use bevy::math::{BVec3, Vec3};
 use bevy::prelude::Component;
@@ -59,6 +60,9 @@ pub struct Player {
     /// the camera basis degenerates.
     pub pitch: f32,
     pub motion: Motion,
+    /// Their car: pocketed, parked, or under them. While they are driving, `motion` is not
+    /// consulted at all — the car is what moves, and `pos` is the seat it puts them in.
+    pub ride: Ride,
 }
 
 impl Player {
@@ -70,6 +74,8 @@ impl Player {
             // Spawning in flight means a peer whose terrain hasn't generated yet doesn't
             // fall through the hole and out of the world.
             motion: Motion::Flying,
+            // You start with nothing, a car included: it has to be dug up and built first.
+            ride: Ride::Pocketed,
         }
     }
 
@@ -77,16 +83,27 @@ impl Player {
         matches!(self.motion, Motion::Flying)
     }
 
+    pub fn is_driving(&self) -> bool {
+        self.ride.is_driving()
+    }
+
+    /// Puts them on their feet, at rest. Getting into a car and getting out of one both go
+    /// through here: a driver who took off flying would step out into the sky, and one who
+    /// got in mid-fall would step out still carrying the speed of it.
+    pub fn stand(&mut self) {
+        self.motion = Motion::Walking {
+            velocity: Vec3::ZERO,
+            grounded: false,
+        };
+    }
+
     /// Switches between walking and flying. Landing starts from rest: keeping the velocity
     /// you had when you took off would drop you at whatever speed gravity last left there.
     pub fn toggle_fly(&mut self) {
-        self.motion = match self.motion {
-            Motion::Flying => Motion::Walking {
-                velocity: Vec3::ZERO,
-                grounded: false,
-            },
-            Motion::Walking { .. } => Motion::Flying,
-        };
+        match self.motion {
+            Motion::Flying => self.stand(),
+            Motion::Walking { .. } => self.motion = Motion::Flying,
+        }
     }
 
     pub fn eye(&self) -> Vec3 {

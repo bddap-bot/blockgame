@@ -13,7 +13,7 @@ use bevy::prelude::*;
 use crate::game::{Me, NetRole, Peers};
 use crate::inventory::{Held, Inventories};
 use crate::net::{Role, Session};
-use crate::registry::{HOTBAR_COLUMNS, Item};
+use crate::registry::{Class, HOTBAR_COLUMNS, Item};
 
 /// Cell size, in the Deck's 1280x800 pixels. Seven of these across is 766px — wide enough
 /// for the longest item name at [`CELL_FONT`], narrow enough that two rows leave the world
@@ -167,7 +167,9 @@ pub fn update_status(
     let Ok(mut text) = text.single_mut() else {
         return;
     };
-    let mode = if me.0.is_flying() {
+    let mode = if me.0.is_driving() {
+        "driving"
+    } else if me.0.is_flying() {
         "flying"
     } else {
         "walking"
@@ -235,7 +237,11 @@ pub fn update_hotbar(
 
     if let Ok((mut text, mut color)) = recipe.single_mut() {
         let item = held.0;
-        let (line, tint) = if item.recipe().is_empty() {
+        let (line, tint) = if let Some(how) = using_it(item, inventory.count(item)) {
+            // Once you own one, the line stops costing it and starts telling you which
+            // buttons work it. A car in the pocket is no use if nobody says how to get in.
+            (format!("{} - {how}", title(item)), Color::WHITE)
+        } else if item.recipe().is_empty() {
             (format!("{} - dig it up", title(item)), Color::WHITE)
         } else {
             let cost: Vec<String> = item
@@ -270,6 +276,24 @@ fn title(item: Item) -> String {
     match item.using().summary() {
         Some(does) => format!("{} ({what}, {does})", item.name()),
         None => format!("{} ({what})", item.name()),
+    }
+}
+
+/// Which buttons work the thing, for the classes whose button is not the trigger — and
+/// only once the player has one, because until then what they need told is the price.
+///
+/// A tool needs no row here: [`crate::registry::Use::summary`] already says what holding
+/// the trigger does, and holding the trigger is the whole of using one.
+fn using_it(item: Item, owned: u32) -> Option<&'static str> {
+    if owned == 0 {
+        return None;
+    }
+    match item.class() {
+        Class::Vehicle { .. } => Some("L2 puts it down and picks it up, B drives"),
+        Class::Block(_)
+        | Class::Tool { .. }
+        | Class::Component { .. }
+        | Class::Equippable { .. } => None,
     }
 }
 

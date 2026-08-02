@@ -38,6 +38,8 @@ pub struct KeyBinds {
     pub place_block: MouseButton,
     /// Makes one of whatever the hotbar cursor is on.
     pub craft: KeyCode,
+    /// Gets into the car in front of you, and back out of it again.
+    pub ride: KeyCode,
     /// Step the hotbar cursor one cell.
     pub prev_item: KeyCode,
     pub next_item: KeyCode,
@@ -60,6 +62,7 @@ pub const KEYS: KeyBinds = KeyBinds {
     use_item: MouseButton::Left,
     place_block: MouseButton::Right,
     craft: KeyCode::KeyC,
+    ride: KeyCode::KeyR,
     prev_item: KeyCode::KeyQ,
     next_item: KeyCode::KeyE,
     slots: [
@@ -84,6 +87,9 @@ pub struct PadBinds {
     /// X — makes one of whatever the hotbar cursor is on. The only face button no
     /// movement action uses, so crafting never fights with jumping.
     pub craft: GamepadButton,
+    /// B — get in the car, get out of the car. The last free face button, and the one a
+    /// thumb is already resting on.
+    pub ride: GamepadButton,
     /// R2 — the trigger, held: swing, drill or fire whatever is in hand.
     pub use_item: GamepadButton,
     /// L2 — the other trigger, tapped: put a block down.
@@ -109,6 +115,7 @@ pub const PAD: PadBinds = PadBinds {
     jump: GamepadButton::South,
     toggle_fly: GamepadButton::North,
     craft: GamepadButton::West,
+    ride: GamepadButton::East,
     use_item: GamepadButton::RightTrigger2,
     place_block: GamepadButton::LeftTrigger2,
     sprint: GamepadButton::RightTrigger,
@@ -142,6 +149,8 @@ pub struct Intent {
     pub item_pick: Option<usize>,
     /// Make one of whatever the cursor is on.
     pub craft: bool,
+    /// Get into your car, or out of it. Tapped: held, it would be a door flapping.
+    pub ride: bool,
     pub quit: bool,
 }
 
@@ -175,6 +184,7 @@ pub fn gather_intent(
     out.use_item = mouse.pressed(KEYS.use_item);
     out.place_block = mouse.just_pressed(KEYS.place_block);
     out.craft = keys.just_pressed(KEYS.craft);
+    out.ride = keys.just_pressed(KEYS.ride);
     out.quit = keys.just_pressed(KEYS.quit);
     out.item_delta =
         keys.just_pressed(KEYS.next_item) as i32 - keys.just_pressed(KEYS.prev_item) as i32;
@@ -202,6 +212,7 @@ pub fn gather_intent(
         out.use_item |= pad.pressed(PAD.use_item);
         out.place_block |= pad.just_pressed(PAD.place_block);
         out.craft |= pad.just_pressed(PAD.craft);
+        out.ride |= pad.just_pressed(PAD.ride);
         out.item_delta +=
             pad.just_pressed(PAD.next_item) as i32 - pad.just_pressed(PAD.prev_item) as i32;
         out.item_delta += (pad.just_pressed(PAD.next_row) as i32

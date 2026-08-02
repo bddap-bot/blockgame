@@ -16,10 +16,12 @@ use crate::hud;
 use crate::input::{Intent, PITCH_LIMIT, gather_intent};
 use crate::inventory::{Held, Inventories, Inventory};
 use crate::mesh::{ChunkMesh, build_chunk_mesh};
+use crate::net::wire::CarPose;
 use crate::net::{Boot, Event, Msg, PlayerId, Pose, Role, Session, Target};
 use crate::player::{self, Motion, Player};
 use crate::raycast;
-use crate::registry::{Block, Item, Use};
+use crate::registry::{Block, Class, Item, Use};
+use crate::vehicle::{self, Ride};
 use crate::world::{BlockPos, CHUNK_SIZE, ChunkPos, World};
 
 /// Chunks of terrain visible in every direction.
@@ -71,6 +73,10 @@ pub struct Peers(pub HashMap<PlayerId, PeerState>);
 pub struct PeerState {
     /// Feet position from this player's most recent believed [`Msg::Pose`].
     pos: Vec3,
+    /// Their car, if they have one out — where it is and which way it points. Just the
+    /// drawing: nothing about this player's own rules is checked against it, because a car
+    /// only ever moves the driver's feet, and *those* are budgeted.
+    car: Option<CarPose>,
     /// The model drawing them.
     body: avatar::Body,
     /// What their model is currently shown holding. Kept so a pose that says the same
@@ -102,6 +108,10 @@ const _: () = assert!(WORLD_EDIT_RATE < EDIT_RATE * 8.0);
 /// next one has to cover the gap.
 const TRAVEL_RATE: f32 = player::FLY_SPEED * 3.0;
 const TRAVEL_BURST: f32 = 64.0;
+// A driver's feet are in the car, so a car quicker than this allowance would have its own
+// driver refused as a teleporter: their pose would be dropped and nobody would see them
+// move at all. `driving_stays_inside_the_travel_budget` walks the arithmetic.
+const _: () = assert!(vehicle::TOP_SPEED < TRAVEL_RATE);
 
 /// An allowance that refills with time: a token bucket.
 ///
@@ -184,6 +194,11 @@ fn chew(previous: Option<Dig>, block: BlockPos, using: Use, dt: f32) -> Dig {
     }
 }
 
+/// Every car currently drawn, by whose it is — the local player's under their own id, so
+/// there is one path from "somebody has a car out" to "a car is on the screen".
+#[derive(Resource, Default)]
+struct Cars(HashMap<PlayerId, Entity>);
+
 #[derive(Component)]
 struct ChunkTag;
 
@@ -227,6 +242,7 @@ pub fn run(boot: Boot) -> anyhow::Result<()> {
     .init_resource::<Chunks>()
     .init_resource::<Digging>()
     .init_resource::<Peers>()
+    .init_resource::<Cars>()
     .init_resource::<Inventories>()
     .init_resource::<Welcomed>()
     .init_resource::<WorldBudget>()
@@ -236,8 +252,10 @@ pub fn run(boot: Boot) -> anyhow::Result<()> {
         Update,
         (
             gather_intent,
+            park_or_ride,
             apply_intent,
             net_receive,
+            draw_cars,
             target_and_edit,
             aim_zoom,
             craft_on_request,
@@ -336,8 +354,23 @@ fn apply_intent(
     let dt = time.delta_secs().min(0.05);
     let p = &mut me.0;
 
-    p.yaw += intent.look.x;
     p.pitch = (p.pitch + intent.look.y).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+
+    // Driving is the whole of movement while you are in a car: the car is what moves, the
+    // seat is where you are, and steering is what turns you — so the camera follows the car
+    // without a second camera to follow it with. Look is still free in pitch, which is what
+    // lets a passing hill be shot at from the driver's seat with no extra rule.
+    if let Ride::Driving(car) = p.ride {
+        let driven = vehicle::drive(&sim.0, car, intent.walk, dt);
+        p.yaw = driven.yaw;
+        p.pos = driven.seat();
+        p.ride = Ride::Driving(driven);
+        pick_item(&intent, &mut held);
+        aim_camera(p, &mut camera);
+        return;
+    }
+
+    p.yaw += intent.look.x;
     if intent.toggle_fly {
         p.toggle_fly();
     }
@@ -373,19 +406,131 @@ fn apply_intent(
         *grounded = moved.grounded;
     }
 
-    // The number row reaches the first nine cells; stepping reaches every cell. A key
-    // pointed past the end of the hotbar does nothing rather than wrapping round to
-    // something the player was not aiming at.
+    pick_item(&intent, &mut held);
+    aim_camera(p, &mut camera);
+}
+
+/// Moves the hotbar cursor. The number row reaches the first nine cells; stepping reaches
+/// every cell. A key pointed past the end of the hotbar does nothing rather than wrapping
+/// round to something the player was not aiming at.
+fn pick_item(intent: &Intent, held: &mut Held) {
     if let Some(cell) = intent.item_pick.and_then(|slot| Item::ALL.get(slot)) {
         held.0 = *cell;
     }
     if intent.item_delta != 0 {
         held.0 = held.0.step(intent.item_delta);
     }
+}
 
+/// Puts the camera in the player's head. The one place it is moved, so a driver's view and
+/// a walker's are the same view of the same eye — a car needs no camera of its own.
+fn aim_camera(p: &Player, camera: &mut Query<&mut Transform, With<Camera3d>>) {
     if let Ok(mut t) = camera.single_mut() {
         t.translation = p.eye();
         t.rotation = Quat::from_euler(EulerRot::YXZ, p.yaw, p.pitch, 0.0);
+    }
+}
+
+/// The car button, and the place button when a vehicle is in hand.
+///
+/// Putting a car down and picking it back up is the *place* button, which is what puts
+/// whatever is in your hand into the world — which one it does comes off the class in the
+/// registry, not a car-shaped branch. Getting in and out is its own button, because
+/// standing next to your parked car and putting a *second* one down is not what anybody
+/// means by pressing it.
+///
+/// A car is never spent. The [`Item::Car`] in your pocket is the title to it: you can have
+/// one out because you built one, and pocketing it is how you get the field back.
+fn park_or_ride(
+    intent: Res<Intent>,
+    held: Res<Held>,
+    inventories: Res<Inventories>,
+    session: NonSend<Session>,
+    sim: Res<Sim>,
+    mut me: ResMut<Me>,
+) {
+    let p = &mut me.0;
+    let holding_a_vehicle = matches!(
+        inventories
+            .of(session.me())
+            .in_hand(held.0)
+            .map(Item::class),
+        Some(Class::Vehicle { .. })
+    );
+    if intent.place_block && holding_a_vehicle {
+        p.ride = match p.ride {
+            Ride::Pocketed => match vehicle::park_in_front(&sim.0, p.pos, p.yaw) {
+                Some(car) => Ride::Parked(car),
+                // Nowhere generated to stand it on. Leave it in the pocket rather than drop
+                // it into a chunk that has not arrived.
+                None => Ride::Pocketed,
+            },
+            Ride::Parked(_) => Ride::Pocketed,
+            // You cannot pocket the car you are sitting in.
+            Ride::Driving(car) => Ride::Driving(car),
+        };
+    }
+
+    if intent.ride {
+        let (ride, feet) = vehicle::toggle_ride(p.ride, p.pos);
+        if ride != p.ride {
+            p.ride = ride;
+            p.pos = feet;
+            p.stand();
+        }
+    }
+}
+
+/// Draws every car anybody has out — the local player's and each peer's, from the one map,
+/// so what you see of your own car and what you see of theirs is the same code.
+fn draw_cars(
+    me: Res<Me>,
+    session: NonSend<Session>,
+    peers: Res<Peers>,
+    palette: Res<avatar::Palette>,
+    mut cars: ResMut<Cars>,
+    mut commands: Commands,
+) {
+    let mut out: HashMap<PlayerId, Transform> = peers
+        .0
+        .iter()
+        .filter_map(|(id, p)| {
+            p.car
+                .map(|car| (*id, car_transform(car.pos.into(), car.yaw)))
+        })
+        .collect();
+    if let Some(car) = me.0.ride.car() {
+        out.insert(session.me(), car_transform(car.pos, car.yaw));
+    }
+
+    // Pocketed, or its owner left. Either way there is no car there any more.
+    cars.0.retain(|id, entity| {
+        let gone = !out.contains_key(id);
+        if gone {
+            commands.entity(*entity).despawn();
+        }
+        !gone
+    });
+    for (id, transform) in out {
+        match cars.0.get(&id) {
+            Some(entity) => {
+                commands.entity(*entity).insert(transform);
+            }
+            None => {
+                cars.0
+                    .insert(id, avatar::spawn_car(&mut commands, &palette, transform));
+            }
+        }
+    }
+}
+
+/// A car's model transform. Its `pos` is the middle of its underside, which is the model's
+/// origin — the same relationship a player's feet have to their body.
+fn car_transform(pos: Vec3, yaw: f32) -> Transform {
+    Transform {
+        translation: pos,
+        rotation: Quat::from_rotation_y(yaw),
+        ..default()
     }
 }
 
@@ -896,7 +1041,11 @@ fn net_receive(
                         inventories.0.insert(me, Inventory::from_contents(items));
                     }
                     Msg::Pose { id, pose } => {
-                        // The host is the only relay.
+                        // The host is the only relay, and it vouches for what it relays.
+                        let pose = match role.0 {
+                            Role::Host => vouched(pose, inventories.of(id)),
+                            Role::Peer { .. } => pose,
+                        };
                         if role.0 == Role::Host {
                             session.send(Target::All, Msg::Pose { id, pose });
                         }
@@ -932,6 +1081,23 @@ fn net_receive(
     }
 }
 
+/// The host's cut of a pose before it relays it: the parts it can actually vouch for.
+///
+/// A car is one of them. The host hands out every [`Item::Car`] there is, so a peer
+/// claiming to have one out without owning one is claiming something the host knows is
+/// false, and the car simply does not exist for anybody else.
+///
+/// *Where* the car is stays the driver's word — the same standing as where their own feet
+/// are, and for the same reason: it is continuous motion nobody else simulates. What keeps
+/// that honest is that a driver's feet are in the car, and feet are what
+/// [`TRAVEL_RATE`] bites on.
+fn vouched(pose: Pose, owner: &Inventory) -> Pose {
+    Pose {
+        car: pose.car.filter(|_| owner.count(Item::Car) > 0),
+        ..pose
+    }
+}
+
 /// Records where a player is and keeps their model there, spawning it the first time.
 ///
 /// A pose is a *claim*, and on the host it is what every proximity rule is checked
@@ -958,6 +1124,7 @@ fn track_peer(
                 return;
             }
             p.pos = pos;
+            p.car = pose.car;
             commands.entity(p.body.root).insert(transform);
             // Only when it changes: a pose arrives every frame, and re-stating the same
             // cube would be sixty component writes a second per player to no effect.
@@ -973,6 +1140,7 @@ fn track_peer(
                 id,
                 PeerState {
                     pos,
+                    car: pose.car,
                     body,
                     held: pose.held,
                     budget: Budget::new(EDIT_RATE, EDIT_BURST),
@@ -1019,6 +1187,10 @@ fn net_send_pose(
                 yaw: me.0.yaw,
                 pitch: me.0.pitch,
                 held: holding,
+                car: me.0.ride.car().map(|car| CarPose {
+                    pos: car.pos.into(),
+                    yaw: car.yaw,
+                }),
             },
         },
     );
@@ -1549,6 +1721,7 @@ mod tests {
                 yaw: 0.0,
                 pitch: 0.0,
                 held: None,
+                car: None,
             },
         };
         assert!(!authorized(role, stranger, &pose), "not the host");
@@ -1570,6 +1743,7 @@ mod tests {
                 yaw: 0.0,
                 pitch: 0.0,
                 held: None,
+                car: None,
             },
         };
         assert!(authorized(Role::Host, peer, &pose(peer)));
@@ -1759,6 +1933,59 @@ mod tests {
             Block::Stone
         ));
         assert_eq!(inventory.count(Item::Stone), before, "charged for nothing");
+    }
+
+    /// A car is a thing the host handed you, so a peer that never built one cannot make
+    /// one appear in anybody's world by saying it has one. The rest of the pose is
+    /// untouched: this strips a claim, it does not rewrite a player.
+    #[test]
+    fn a_car_nobody_built_is_not_relayed() {
+        let claimed = Pose {
+            pos: [1.0, 2.0, 3.0],
+            yaw: 0.5,
+            pitch: -0.25,
+            held: Some(Item::Car),
+            car: Some(CarPose {
+                pos: [10.0, 40.0, 10.0],
+                yaw: 1.0,
+            }),
+        };
+
+        let empty = Inventory::default();
+        let cut = vouched(claimed, &empty);
+        assert_eq!(cut.car, None, "a car out of thin air");
+        assert_eq!(
+            Pose {
+                car: claimed.car,
+                ..cut
+            },
+            claimed,
+            "the rest of the pose was rewritten too"
+        );
+
+        let mut owner = Inventory::default();
+        owner.add(Item::Car, 1);
+        assert_eq!(
+            vouched(claimed, &owner),
+            claimed,
+            "he built it, he drives it"
+        );
+    }
+
+    /// A driver's feet are in the car, so driving spends the same travel allowance walking
+    /// does. A car quicker than the budget would have its own driver refused as a
+    /// teleporter — the pose stream would drop them, and nobody would see them move.
+    #[test]
+    fn driving_stays_inside_the_travel_budget() {
+        let mut travel = Budget::new(TRAVEL_RATE, TRAVEL_BURST);
+        // A minute of flat out, a frame at a time, and never spent.
+        for _ in 0..60 * 60 {
+            travel.refill(1.0 / 60.0);
+            assert!(
+                travel.spend(vehicle::TOP_SPEED / 60.0),
+                "a flat-out car outran its own driver's pose budget"
+            );
+        }
     }
 
     /// A peer's pile is the host's to state, and a peer's craft is the host's to grant.

@@ -1,16 +1,16 @@
-//! The player model — **the one place a body is built.**
+//! The models — **the one place a body is built.**
 //!
-//! Drawn from `design/spaceman-avatar.jpg`: a white suit with teal trim, a bubble helmet
-//! whose dark visor is ringed in teal, a backpack, a chest panel with a rocket on it,
-//! mitten hands, knee patches and boots. Every part is the same unit cube scaled and
-//! placed, so the whole model is the [`SPACEMAN`] table and swapping it for a different
-//! body is an edit to that table — no other file changes.
+//! [`SPACEMAN`] is drawn from `design/spaceman-avatar.jpg`: a white suit with teal trim, a
+//! bubble helmet whose dark visor is ringed in teal, a backpack, a chest panel with a
+//! rocket on it, mitten hands, knee patches and boots. [`CAR`] is the buggy he drives.
+//! Every part of both is the same unit cube scaled and placed, so a model *is* its table
+//! and swapping one for a different shape is an edit to that table — no other file changes.
 //!
-//! Coordinates are relative to the player's feet, in blocks: `+Y` is up, `-Z` is the way
-//! they are facing.
+//! Coordinates are relative to the thing's own feet, in blocks: `+Y` is up, `-Z` is the way
+//! it faces. A player's feet and a car's underside are the same origin, which is what lets
+//! [`crate::vehicle::SEAT`] be one offset between them.
 
 use bevy::prelude::*;
-use std::collections::HashMap;
 
 use crate::registry::Item;
 
@@ -19,12 +19,15 @@ use crate::registry::Item;
 pub enum Skin {
     /// The white suit.
     Suit,
-    /// Teal: trim, boots, mittens, the visor ring.
+    /// Teal: trim, boots, mittens, the visor ring, the car's lamps and hubs.
     Trim,
-    /// Grey hardware — the backpack.
+    /// Grey hardware — the backpack, the roll bar, the bumpers.
     Gear,
-    /// Near-black gloss: the visor, and the rocket inked on the chest panel.
+    /// Near-black gloss: the visor, the rocket inked on the chest panel, tyres and glass.
     Dark,
+    /// Bodywork, painted whatever colour the registry gives [`Item::Car`] — so the car in
+    /// the world and the cell in the hotbar are the same blue by construction.
+    Paint(Item),
 }
 
 pub struct Part {
@@ -92,6 +95,45 @@ pub const SPACEMAN: &[Part] = &[
     part(Skin::Trim, [0.04, 0.30, 0.03], [0.145, 1.58, -0.215]),
 ];
 
+/// The car, one row per box: an open buggy, so the driver standing at the wheel is visible
+/// from outside rather than sealed into a coloured box.
+///
+/// Open-topped for a second reason too — the body has no sitting pose, so a driver stands
+/// on the deck. Under a roof that would be a spaceman with his helmet through the ceiling.
+pub const CAR: &[Part] = &[
+    // chassis and the deck the driver stands on
+    part(Skin::Paint(Item::Car), [1.10, 0.30, 1.70], [0.0, 0.28, 0.0]),
+    part(Skin::Dark, [0.90, 0.06, 0.80], [0.0, 0.44, 0.25]),
+    // bonnet, and the screen between it and the driver
+    part(
+        Skin::Paint(Item::Car),
+        [0.98, 0.18, 0.62],
+        [0.0, 0.52, -0.50],
+    ),
+    part(Skin::Dark, [0.88, 0.30, 0.05], [0.0, 0.62, -0.17]),
+    part(Skin::Trim, [0.92, 0.05, 0.06], [0.0, 0.79, -0.17]),
+    // roll bar behind the seat
+    part(Skin::Gear, [0.09, 0.44, 0.09], [-0.42, 0.72, 0.62]),
+    part(Skin::Gear, [0.09, 0.44, 0.09], [0.42, 0.72, 0.62]),
+    part(Skin::Gear, [0.93, 0.09, 0.09], [0.0, 0.98, 0.62]),
+    // wheels, at the corners of the footprint the physics drives on
+    part(Skin::Dark, [0.18, 0.40, 0.40], [-0.55, 0.20, -0.62]),
+    part(Skin::Dark, [0.18, 0.40, 0.40], [0.55, 0.20, -0.62]),
+    part(Skin::Dark, [0.18, 0.40, 0.40], [-0.55, 0.20, 0.62]),
+    part(Skin::Dark, [0.18, 0.40, 0.40], [0.55, 0.20, 0.62]),
+    part(Skin::Trim, [0.21, 0.16, 0.16], [-0.55, 0.20, -0.62]),
+    part(Skin::Trim, [0.21, 0.16, 0.16], [0.55, 0.20, -0.62]),
+    part(Skin::Trim, [0.21, 0.16, 0.16], [-0.55, 0.20, 0.62]),
+    part(Skin::Trim, [0.21, 0.16, 0.16], [0.55, 0.20, 0.62]),
+    // bumpers and lamps — which end is the front, from a distance
+    part(Skin::Gear, [1.06, 0.14, 0.10], [0.0, 0.22, -0.90]),
+    part(Skin::Gear, [1.06, 0.14, 0.10], [0.0, 0.22, 0.90]),
+    part(Skin::Trim, [0.16, 0.12, 0.06], [-0.34, 0.36, -0.86]),
+    part(Skin::Trim, [0.16, 0.12, 0.06], [0.34, 0.36, -0.86]),
+    part(Skin::Dark, [0.14, 0.10, 0.06], [-0.34, 0.36, 0.86]),
+    part(Skin::Dark, [0.14, 0.10, 0.06], [0.34, 0.36, 0.86]),
+];
+
 /// The cube in a player's right mitten: where it sits, and how big it is.
 ///
 /// One cube whatever is being carried, coloured from the item table. A rifle that is
@@ -113,8 +155,9 @@ pub struct Palette {
     trim: Handle<StandardMaterial>,
     gear: Handle<StandardMaterial>,
     dark: Handle<StandardMaterial>,
-    /// Built from the registry, so a new item is drawable in a hand the moment it exists.
-    items: HashMap<Item, Handle<StandardMaterial>>,
+    /// Built from the registry and indexed by [`Item::index`], so a new item is drawable
+    /// the moment it exists and "no material for that item" is not a state to handle.
+    items: [Handle<StandardMaterial>; Item::COUNT],
 }
 
 impl Palette {
@@ -126,13 +169,12 @@ impl Palette {
                 ..default()
             })
         };
-        let mut items = HashMap::new();
-        for item in Item::ALL {
-            // Linear, because that is the space the registry's colours are in — the same
-            // numbers the mesher bakes into a block's faces.
-            let [r, g, b] = item.color();
-            items.insert(*item, paint(Color::linear_rgb(r, g, b), 0.8));
-        }
+        // Linear, because that is the space the registry's colours are in — the same
+        // numbers the mesher bakes into a block's faces.
+        let items = std::array::from_fn(|i| {
+            let [r, g, b] = Item::ALL[i].color();
+            paint(Color::linear_rgb(r, g, b), 0.8)
+        });
         Self {
             cube: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
             suit: paint(Color::srgb(0.93, 0.94, 0.95), 0.85),
@@ -149,7 +191,13 @@ impl Palette {
             Skin::Trim => self.trim.clone(),
             Skin::Gear => self.gear.clone(),
             Skin::Dark => self.dark.clone(),
+            Skin::Paint(item) => self.item(item),
         }
+    }
+
+    /// The colour the registry gives an item — what it is drawn in wherever it appears.
+    fn item(&self, item: Item) -> Handle<StandardMaterial> {
+        self.items[item.index()].clone()
     }
 }
 
@@ -178,31 +226,44 @@ pub fn spawn(commands: &mut Commands, palette: &Palette, transform: Transform) -
     let root = commands
         .spawn((transform, Visibility::Visible))
         .add_child(hand)
-        .with_children(|body| {
-            for p in SPACEMAN {
-                body.spawn((
-                    Mesh3d(palette.cube.clone()),
-                    MeshMaterial3d(palette.material(p.skin)),
-                    Transform {
-                        translation: Vec3::from(p.at),
-                        scale: Vec3::from(p.size),
-                        ..default()
-                    },
-                ));
-            }
-        })
+        .with_children(|body| build(body, palette, SPACEMAN))
         .id();
     Body { root, hand }
+}
+
+/// Spawns one car at `transform` (its underside). The ONE site a car model is created —
+/// the local player's own and every peer's alike, so what you drive and what everybody
+/// else watches you drive is the same table of boxes.
+pub fn spawn_car(commands: &mut Commands, palette: &Palette, transform: Transform) -> Entity {
+    commands
+        .spawn((transform, Visibility::Visible))
+        .with_children(|car| build(car, palette, CAR))
+        .id()
+}
+
+/// One table of boxes under a parent. The only place a [`Part`] becomes geometry.
+fn build(model: &mut ChildSpawnerCommands, palette: &Palette, parts: &[Part]) {
+    for p in parts {
+        model.spawn((
+            Mesh3d(palette.cube.clone()),
+            MeshMaterial3d(palette.material(p.skin)),
+            Transform {
+                translation: Vec3::from(p.at),
+                scale: Vec3::from(p.size),
+                ..default()
+            },
+        ));
+    }
 }
 
 /// Puts `held` in this body's hand, or empties it. Idempotent — the caller is a pose
 /// stream, and re-stating what is already there costs a component write.
 pub fn show_held(commands: &mut Commands, palette: &Palette, body: Body, held: Option<Item>) {
-    match held.and_then(|item| palette.items.get(&item)) {
-        Some(material) => {
+    match held {
+        Some(item) => {
             commands.entity(body.hand).insert((
                 Mesh3d(palette.cube.clone()),
-                MeshMaterial3d(material.clone()),
+                MeshMaterial3d(palette.item(item)),
                 Visibility::Visible,
             ));
         }
@@ -215,6 +276,7 @@ pub fn show_held(commands: &mut Commands, palette: &Palette, body: Body, held: O
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vehicle;
 
     /// How far any part may sit from the player's centre in X or Z. Wider than
     /// `player::HALF_WIDTH` on purpose — see the test below.
@@ -258,12 +320,68 @@ mod tests {
 
     #[test]
     fn every_part_has_volume() {
-        for (i, p) in SPACEMAN.iter().enumerate() {
-            assert!(
-                p.size.iter().all(|d| *d > 0.0),
-                "part {i} has a zero dimension"
-            );
+        for (name, parts) in [("spaceman", SPACEMAN), ("car", CAR)] {
+            for (i, p) in parts.iter().enumerate() {
+                assert!(
+                    p.size.iter().all(|d| *d > 0.0),
+                    "{name} part {i} has a zero dimension"
+                );
+            }
         }
+    }
+
+    /// The car stands on its wheels, and its wheels stand on the corners the physics
+    /// samples the ground at. Drift between the two is a car visibly hovering over a step
+    /// it has already climbed, or sunk into one it has not.
+    #[test]
+    fn the_car_sits_on_the_footprint_it_drives_on() {
+        let lowest = CAR
+            .iter()
+            .map(|p| p.at[1] - p.size[1] / 2.0)
+            .fold(f32::MAX, f32::min);
+        assert!(
+            lowest.abs() < 0.01,
+            "the car's lowest part is at {lowest}, not on the ground"
+        );
+
+        // The wheels are the widest parts along both axes, and their centres are the
+        // footprint.
+        let corner = |x: f32, z: f32| {
+            CAR.iter().any(|p| {
+                (p.at[0] - x).abs() < 0.01 && (p.at[2] - z).abs() < 0.01 && p.size[1] > 0.3
+            })
+        };
+        for (x, z) in [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
+            let (x, z) = (x * vehicle::HALF_WIDTH, z * vehicle::HALF_LENGTH);
+            assert!(corner(x, z), "no wheel at the footprint corner ({x}, {z})");
+        }
+    }
+
+    /// The driver stands on the car's deck, not through it and not in the air above it.
+    /// [`vehicle::SEAT`] is a number in another file; this is what keeps it honest.
+    #[test]
+    fn the_driver_stands_on_the_deck() {
+        let seat = vehicle::SEAT;
+        let deck = CAR
+            .iter()
+            .filter(|p| {
+                let (half_x, half_z) = (p.size[0] / 2.0, p.size[2] / 2.0);
+                (p.at[0] - seat.x).abs() <= half_x && (p.at[2] - seat.z).abs() <= half_z
+            })
+            .map(|p| p.at[1] + p.size[1] / 2.0)
+            .fold(f32::MIN, f32::max);
+        assert!(
+            (seat.y - deck).abs() < 0.02,
+            "the driver's feet are at {}, the deck under them at {deck}",
+            seat.y
+        );
+        // ... and the whole standing figure fits inside the roll bar's footprint, so he
+        // reads as being *in* the car rather than balanced on it.
+        let widest = CAR
+            .iter()
+            .map(|p| p.at[0].abs() + p.size[0] / 2.0)
+            .fold(0.0, f32::max);
+        assert!(widest > REACH_OUT, "the car is narrower than its driver");
     }
 
     /// The chest decoration is a stack of thin plates on the torso's front face: frame,

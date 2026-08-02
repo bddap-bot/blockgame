@@ -15,6 +15,7 @@ mod player;
 mod portrait;
 mod raycast;
 mod registry;
+mod vehicle;
 mod world;
 
 use anyhow::Result;
@@ -43,7 +44,7 @@ enum Command {
         #[arg(value_name = "TICKET")]
         ticket: net::PlayerId,
     },
-    /// Render the player model to a PNG. Regenerates `docs/spaceman.png`.
+    /// Render a model to a PNG. Regenerates `docs/spaceman.png` and `docs/car.png`.
     Portrait {
         #[arg(long, default_value = "docs/spaceman.png")]
         out: std::path::PathBuf,
@@ -51,13 +52,16 @@ enum Command {
         /// by default, which is what `docs/spaceman.png` shows.
         #[arg(long, value_name = "ITEM")]
         holding: Option<String>,
+        /// Draw the car instead, with him at the wheel.
+        #[arg(long)]
+        car: bool,
     },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let join = match cli.command {
-        Some(Command::Portrait { out, holding }) => {
+        Some(Command::Portrait { out, holding, car }) => {
             // A name nothing answers to is refused here rather than quietly rendering an
             // empty hand and leaving you to wonder which of the two is broken.
             let holding = holding
@@ -67,7 +71,12 @@ fn main() -> Result<()> {
                     })
                 })
                 .transpose()?;
-            return portrait::run(out, holding);
+            let subject = if car {
+                portrait::Subject::Car
+            } else {
+                portrait::Subject::Spaceman
+            };
+            return portrait::run(out, holding, subject);
         }
         Some(Command::Join { ticket }) => Some(ticket),
         None => None,
