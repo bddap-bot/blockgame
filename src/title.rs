@@ -220,7 +220,7 @@ fn dial(join: Option<(String, EndpointAddr)>, seed: u64, machine: &str) -> Doing
     let machine = machine.to_string();
     let (tx, outcome) = channel();
     std::thread::spawn(move || {
-        let _ = tx.send(crate::net::boot(addr, seed, &machine));
+        let _ = tx.send(crate::net::boot(addr, seed, &machine, lan::PORT));
     });
     Doing::Dialing {
         what,

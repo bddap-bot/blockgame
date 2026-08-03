@@ -344,9 +344,14 @@ impl<C: Clone> Bus<C> {
 /// `name` is what this machine's game is called on the LAN, and is only used when
 /// hosting.
 ///
+/// `discovery` is the port a host answers join questions on: [`lan::PORT`] for a real
+/// game, since a broadcast question has nowhere to look the number up. A test passes 0
+/// and reads back [`lan::Beacon::port`], so it never has to take the port off a game
+/// somebody is playing.
+///
 /// Joining blocks until the host's `Welcome` arrives, so the game is built with a
 /// complete world in hand and no "world not ready yet" state exists to handle.
-pub fn boot(join: Option<EndpointAddr>, seed: u64, name: &str) -> Result<Boot> {
+pub fn boot(join: Option<EndpointAddr>, seed: u64, name: &str, discovery: u16) -> Result<Boot> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -403,7 +408,7 @@ pub fn boot(join: Option<EndpointAddr>, seed: u64, name: &str) -> Result<Boot> {
     // the kind of thing somebody spends an evening on.
     let beacon = match &join {
         Some(_) => None,
-        None => match lan::Beacon::open(name.to_string(), lan::PORT) {
+        None => match lan::Beacon::open(name.to_string(), discovery) {
             Ok(beacon) => Some(beacon),
             Err(e) => {
                 eprintln!("this game will not appear on the LAN join menu: {e:#}");
@@ -730,12 +735,17 @@ mod tests {
     ///
     /// The host's welcome is answered here rather than by [`crate::game`], because what
     /// is under test is the joining, not the world.
+    ///
+    /// Discovery runs on a port the kernel picks, not [`lan::PORT`]: on a machine where
+    /// the game is actually being played that port is taken, and a test that fights the
+    /// family for it fails for a reason that has nothing to do with joining.
     #[test]
     fn a_game_on_this_network_is_found_and_joined() {
         const SEED: u64 = 4242;
-        let host = boot(None, SEED, "test-host").expect("hosting");
+        let host = boot(None, SEED, "test-host", 0).expect("hosting");
         let host_id = host.session.me();
         let beacon = host.beacon.expect("a host takes the discovery port");
+        let discovery = beacon.port();
         let mut session = host.session;
 
         let serving = Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -758,7 +768,7 @@ mod tests {
             }
         });
 
-        let mut search = lan::Search::open(lan::PORT).expect("a socket to ask with");
+        let mut search = lan::Search::open(discovery).expect("a socket to ask with");
         let looking_since = std::time::Instant::now();
         let game = loop {
             search.ask();
@@ -774,7 +784,8 @@ mod tests {
         };
         assert_eq!(game.name, "test-host");
 
-        let joined = boot(Some(game.addr), 0, "test-peer").expect("joining what was found");
+        let joined =
+            boot(Some(game.addr), 0, "test-peer", discovery).expect("joining what was found");
         assert_eq!(joined.seed, SEED, "the joiner did not get the host's world");
         assert_eq!(joined.role, Role::Peer { host: host_id });
         assert!(

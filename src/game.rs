@@ -2283,7 +2283,9 @@ mod tests {
     #[test]
     fn a_departure_reaches_the_peer_that_never_had_a_link() {
         const SEED: u64 = 909;
-        let host = crate::net::boot(None, SEED, "test-host").expect("hosting");
+        // Discovery on a kernel-picked port: nothing here looks for a game on the LAN,
+        // and taking the well-known one would fight a game somebody is playing.
+        let host = crate::net::boot(None, SEED, "test-host", 0).expect("hosting");
         let host_id = host.session.me();
         let addr = host.session.addr();
 
@@ -2300,8 +2302,8 @@ mod tests {
             who_is_here(&ecs)
         });
 
-        let mut a = playing(crate::net::boot(Some(addr.clone()), 0, "a").expect("a joins"));
-        let mut b = playing(crate::net::boot(Some(addr), 0, "b").expect("b joins"));
+        let mut a = playing(crate::net::boot(Some(addr.clone()), 0, "a", 0).expect("a joins"));
+        let mut b = playing(crate::net::boot(Some(addr), 0, "b", 0).expect("b joins"));
         let a_id = a.non_send_resource::<Session>().me();
         let b_id = b.non_send_resource::<Session>().me();
         let standing_at = Pose {

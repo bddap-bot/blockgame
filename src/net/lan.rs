@@ -83,15 +83,28 @@ pub struct Beacon {
 }
 
 impl Beacon {
-    /// Claims [`PORT`] and starts answering. Fails if something else already holds it —
-    /// a second host on one machine is the usual reason, and the caller says so out loud
-    /// rather than hosting a game that silently cannot be found.
+    /// Claims `port` — [`PORT`] for a real game — and starts answering. Fails if
+    /// something else already holds it: a second host on one machine is the usual
+    /// reason, and the caller says so out loud rather than hosting a game that silently
+    /// cannot be found. Port 0 lets the system pick one nothing else is on, which is
+    /// what a test wants and no player ever does.
     pub fn open(name: String, port: u16) -> Result<Self> {
         let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port))
             .with_context(|| format!("listening for join questions on port {port}"))?;
         sock.set_nonblocking(true)
             .context("making the discovery socket non-blocking")?;
         Ok(Beacon { sock, name })
+    }
+
+    /// The port questions are actually answered on — which a beacon opened on 0 learns
+    /// only from the kernel. Tests alone need it: a real game already knows the answer is
+    /// [`PORT`], and asking a socket bound moments ago for its own address cannot fail.
+    #[cfg(test)]
+    pub fn port(&self) -> u16 {
+        self.sock
+            .local_addr()
+            .expect("a bound socket has an address")
+            .port()
     }
 
     /// Answers everything asked since the last call, and returns how many. Never blocks,
@@ -256,11 +269,13 @@ mod tests {
     /// The whole point of the layer: a host answers, a searcher lists it, and what it
     /// lists is dialable. Both halves are on this machine, which is the case the
     /// loopback entry of [`SHOUT_AT`] exists for.
+    ///
+    /// The port is the kernel's to pick — a test that names one competes for it with
+    /// every other thing on the machine, [`PORT`] and a played game above all.
     #[test]
     fn a_host_on_this_machine_is_found() {
-        let port = 47411;
-        let beacon = Beacon::open("test-box".into(), port).unwrap();
-        let mut search = Search::open(port).unwrap();
+        let beacon = Beacon::open("test-box".into(), 0).unwrap();
+        let mut search = Search::open(beacon.port()).unwrap();
         let host = EndpointAddr::from_parts(
             id(7),
             [TransportAddr::Ip("192.168.9.9:5000".parse().unwrap())],
@@ -293,8 +308,7 @@ mod tests {
     /// game you can see and cannot join.
     #[test]
     fn a_stranger_protocol_is_ignored() {
-        let port = 47412;
-        let beacon = Beacon::open("test-box".into(), port).unwrap();
+        let beacon = Beacon::open("test-box".into(), 0).unwrap();
         let asker = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
         asker.set_broadcast(true).unwrap();
         let question = wire::encode(&Packet::Question {
@@ -302,7 +316,10 @@ mod tests {
         })
         .unwrap();
         asker
-            .send_to(&question, (Ipv4Addr::new(127, 255, 255, 255), port))
+            .send_to(
+                &question,
+                (Ipv4Addr::new(127, 255, 255, 255), beacon.port()),
+            )
             .unwrap();
         std::thread::sleep(Duration::from_millis(50));
         assert_eq!(
