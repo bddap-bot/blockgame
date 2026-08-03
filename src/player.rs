@@ -10,9 +10,10 @@
 //! in hand falls.
 
 use crate::input::Intent;
+use crate::net::PlayerId;
 use crate::registry::{Block, Fall};
 use crate::vehicle::Ride;
-use crate::world::{BlockPos, WORLD_HEIGHT, World};
+use crate::world::{BlockPos, CHUNK_SIZE, WORLD_HEIGHT, World};
 use bevy::math::{BVec3, Vec3};
 use bevy::prelude::Component;
 
@@ -85,6 +86,19 @@ const _: () = assert!(BOUNCE_FLOOR < JUMP_SPEED);
 /// The column the world spawns everybody over. One pair of coordinates, so "where is spawn"
 /// has a single answer.
 pub const SPAWN_COLUMN: (i32, i32) = (8, 8);
+
+/// How far either way from [`SPAWN_COLUMN`] a player may be set down, in blocks.
+///
+/// Seven keeps the whole square inside the one chunk [`SPAWN_COLUMN`] sits in — the chunk
+/// everybody has generated before they are put anywhere — and keeps it small enough that
+/// whoever else is here is on screen the moment you arrive.
+pub const SPAWN_SCATTER: i32 = 7;
+const _: () = assert!(
+    SPAWN_COLUMN.0 - SPAWN_SCATTER >= 0
+        && SPAWN_COLUMN.0 + SPAWN_SCATTER < CHUNK_SIZE
+        && SPAWN_COLUMN.1 - SPAWN_SCATTER >= 0
+        && SPAWN_COLUMN.1 + SPAWN_SCATTER < CHUNK_SIZE
+);
 
 /// Nudge used when snapping out of a block, so the player rests *just* clear of the
 /// surface instead of exactly on it (where the next frame's floor test is a coin flip).
@@ -612,11 +626,32 @@ pub fn advance(world: &World, p: &mut Player, intent: &Intent, fall: Fall, dt: f
     p.condition.hurt(cost);
 }
 
-/// Where everybody starts, above the terrain over [`SPAWN_COLUMN`].
-pub fn spawn_point(world: &World) -> Vec3 {
-    let (x, z) = SPAWN_COLUMN;
+/// Where `who` starts: over their own column of the square around [`SPAWN_COLUMN`], high
+/// enough above the terrain to see where they have landed before they land on it.
+pub fn spawn_point(world: &World, who: PlayerId) -> Vec3 {
+    let (x, z) = spawn_column(who);
     let ground = world.ground_height(x, z);
     Vec3::new(x as f32 + 0.5, ground as f32 + 12.0, z as f32 + 0.5)
+}
+
+/// The column [`spawn_point`] sets `who` down over — theirs, and nobody else's to know.
+///
+/// Terrain is a pure function of the seed, so a spawn read off the world alone is the same
+/// answer on every machine and a joiner arrives inside the host. Reading it off the player
+/// instead is what separates them, and it needs no coordination at all: nobody has to be
+/// told who else is here, and nothing new goes on the wire.
+///
+/// An id is an ed25519 public key, so its bytes are already as evenly spread as anything a
+/// hash could make of them — two of them are the two coordinates. Two players landing on the
+/// same one of the two-hundred-odd columns is a coincidence that costs them a step sideways;
+/// ruling it out entirely would cost a round trip before anyone could be put anywhere.
+fn spawn_column(who: PlayerId) -> (i32, i32) {
+    let span = 2 * SPAWN_SCATTER + 1;
+    let [x, z, ..] = *who.as_bytes();
+    (
+        SPAWN_COLUMN.0 - SPAWN_SCATTER + i32::from(x) % span,
+        SPAWN_COLUMN.1 - SPAWN_SCATTER + i32::from(z) % span,
+    )
 }
 
 #[cfg(test)]
@@ -1255,5 +1290,61 @@ mod tests {
             (0.0, 0.0),
             "movement must stay flat regardless of pitch"
         );
+    }
+
+    /// A deterministic stand-in player id. Ids are public keys, so distinct seed bytes give
+    /// distinct ids.
+    fn id(n: u8) -> PlayerId {
+        iroh::SecretKey::from_bytes(&[n; 32]).public()
+    }
+
+    /// The bug the scatter exists for: host and joiner read the same terrain, so a spawn
+    /// taken from the world alone put the joiner inside the host's head.
+    #[test]
+    fn a_joiner_does_not_spawn_inside_the_host() {
+        let mut w = World::new(20_260_803, []);
+        w.load_chunk(ChunkPos::new(0, 0));
+        let (host, joiner) = (id(1), id(2));
+        let (a, b) = (spawn_point(&w, host), spawn_point(&w, joiner));
+
+        assert_ne!(spawn_column(host), spawn_column(joiner));
+        // Different columns is the whole of "not inside each other": two boxes a block apart
+        // never touched, since a player is only 2 * HALF_WIDTH wide.
+        let apart = (a.x - b.x).abs().max((a.z - b.z).abs());
+        const _: () = assert!(2.0 * HALF_WIDTH < 1.0);
+        assert!(apart >= 1.0, "spawns {a} and {b} are only {apart} apart");
+
+        for p in [a, b] {
+            let column = BlockPos::containing(p);
+            let ground = w.ground_height(column.x, column.z);
+            assert!(
+                w.solid(BlockPos::new(column.x, ground, column.z)),
+                "{p} is over a column whose surface at y={ground} is not solid ground"
+            );
+            assert!(
+                p.y > ground as f32,
+                "{p} spawns inside the ground at {ground}"
+            );
+        }
+    }
+
+    /// The scatter has to be wide, not merely non-constant: a handful of slots would put two
+    /// of four children on the same block often enough to be the same bug again.
+    #[test]
+    fn the_scatter_spreads_over_the_spawn_square() {
+        let columns: std::collections::HashSet<_> =
+            (0..=255).map(|n| spawn_column(id(n))).collect();
+        assert!(
+            columns.len() > 100,
+            "256 players found only {} distinct columns",
+            columns.len()
+        );
+        for (x, z) in columns {
+            assert_eq!(
+                BlockPos::new(x, 0, z).chunk(),
+                ChunkPos::new(0, 0),
+                "column ({x}, {z}) escaped the spawn chunk"
+            );
+        }
     }
 }

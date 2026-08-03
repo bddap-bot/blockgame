@@ -336,7 +336,7 @@ fn enter_world(mut commands: Commands, mut booted: NonSendMut<Booted>) {
         .expect("the world was entered without a network to run it on");
 
     let world = World::new(seed, edits);
-    let spawn = player::spawn_point(&world);
+    let spawn = player::spawn_point(&world, session.me());
 
     if role == Role::Host {
         println!(
