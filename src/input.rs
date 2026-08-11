@@ -184,6 +184,28 @@ fn deadzoned(v: Vec2) -> Vec2 {
     }
 }
 
+/// One controller can arrive as several pads: on the TV, Steam Input publishes a virtual
+/// pad beside the physical device it wraps, and both report the same thumb. So every read
+/// below folds the connected pads into one — a press *any* pad reports is one press, and a
+/// stick takes the strongest reading rather than the sum.
+///
+/// Summing is what made the TV feel broken: one d-pad press stepped the hotbar two cells,
+/// and one stick push turned twice as fast as on the Deck.
+fn tapped(pads: &Query<&Gamepad>, button: GamepadButton) -> bool {
+    pads.iter().any(|pad| pad.just_pressed(button))
+}
+
+fn held(pads: &Query<&Gamepad>, button: GamepadButton) -> bool {
+    pads.iter().any(|pad| pad.pressed(button))
+}
+
+fn stick(pads: &Query<&Gamepad>, which: fn(&Gamepad) -> Vec2) -> Vec2 {
+    pads.iter()
+        .map(|pad| deadzoned(which(pad)))
+        .max_by(|a, b| a.length().total_cmp(&b.length()))
+        .unwrap_or(Vec2::ZERO)
+}
+
 pub fn gather_intent(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
@@ -216,32 +238,23 @@ pub fn gather_intent(
         }
     }
 
-    // Every connected pad contributes; the Deck's built-in controls are one of them.
-    for pad in &pads {
-        let walk = deadzoned(pad.left_stick());
-        if walk != Vec2::ZERO {
-            out.walk += walk;
-        }
-        let look = deadzoned(pad.right_stick());
-        if look != Vec2::ZERO {
-            out.look += Vec2::new(-look.x, look.y) * STICK_LOOK_SPEED * dt;
-        }
-        out.jump |= pad.pressed(PAD.jump);
-        out.sprint |= pad.pressed(PAD.sprint);
-        out.vertical +=
-            pad.pressed(PAD.jump) as i32 as f32 - pad.pressed(PAD.descend) as i32 as f32;
-        out.toggle_fly |= pad.just_pressed(PAD.toggle_fly);
-        out.use_item |= pad.pressed(PAD.use_item);
-        out.place_block |= pad.just_pressed(PAD.place_block);
-        out.craft |= pad.just_pressed(PAD.craft);
-        out.ride |= pad.just_pressed(PAD.ride);
-        out.item_delta +=
-            pad.just_pressed(PAD.next_item) as i32 - pad.just_pressed(PAD.prev_item) as i32;
-        out.item_delta += (pad.just_pressed(PAD.next_row) as i32
-            - pad.just_pressed(PAD.prev_row) as i32)
-            * HOTBAR_COLUMNS as i32;
-        out.pause |= pad.just_pressed(PAD.pause);
-    }
+    // The pads, folded into one — see [`tapped`]. The Deck's built-in controls are one of
+    // them.
+    out.walk += stick(&pads, Gamepad::left_stick);
+    let look = stick(&pads, Gamepad::right_stick);
+    out.look += Vec2::new(-look.x, look.y) * STICK_LOOK_SPEED * dt;
+    out.jump |= held(&pads, PAD.jump);
+    out.sprint |= held(&pads, PAD.sprint);
+    out.vertical += held(&pads, PAD.jump) as i32 as f32 - held(&pads, PAD.descend) as i32 as f32;
+    out.toggle_fly |= tapped(&pads, PAD.toggle_fly);
+    out.use_item |= held(&pads, PAD.use_item);
+    out.place_block |= tapped(&pads, PAD.place_block);
+    out.craft |= tapped(&pads, PAD.craft);
+    out.ride |= tapped(&pads, PAD.ride);
+    out.item_delta += tapped(&pads, PAD.next_item) as i32 - tapped(&pads, PAD.prev_item) as i32;
+    out.item_delta += (tapped(&pads, PAD.next_row) as i32 - tapped(&pads, PAD.prev_row) as i32)
+        * HOTBAR_COLUMNS as i32;
+    out.pause |= tapped(&pads, PAD.pause);
 
     out.walk = out.walk.clamp_length_max(1.0);
     out.vertical = out.vertical.clamp(-1.0, 1.0);
@@ -264,20 +277,20 @@ pub fn gather_menu_intent(
         stick_pushed: false,
     };
 
-    for pad in &pads {
-        out.step += pad.just_pressed(PAD.next_row) as i32 - pad.just_pressed(PAD.prev_row) as i32;
-        out.confirm |= pad.just_pressed(PAD.jump);
-        // B backs out, and so does Start — whichever button opened this, the same one
-        // and the obvious one both close it.
-        out.back |= pad.just_pressed(PAD.ride) || pad.just_pressed(PAD.pause);
-        // The stick reads as a d-pad: pushed past the deadzone is one step, and it has
-        // to come back to centre before it gives another.
-        let pushed = deadzoned(pad.left_stick()).y;
-        if pushed != 0.0 {
-            out.stick_pushed = true;
-            if !menu.stick_pushed {
-                out.step += if pushed < 0.0 { 1 } else { -1 };
-            }
+    // Folded across the pads, exactly as gameplay input is — a menu that moved two rows
+    // per press on the TV would be the same bug wearing a different hat.
+    out.step += tapped(&pads, PAD.next_row) as i32 - tapped(&pads, PAD.prev_row) as i32;
+    out.confirm |= tapped(&pads, PAD.jump);
+    // B backs out, and so does Start — whichever button opened this, the same one and the
+    // obvious one both close it.
+    out.back |= tapped(&pads, PAD.ride) || tapped(&pads, PAD.pause);
+    // The stick reads as a d-pad: pushed past the deadzone is one step, and it has to come
+    // back to centre before it gives another.
+    let pushed = stick(&pads, Gamepad::left_stick).y;
+    if pushed != 0.0 {
+        out.stick_pushed = true;
+        if !menu.stick_pushed {
+            out.step += if pushed < 0.0 { 1 } else { -1 };
         }
     }
 
