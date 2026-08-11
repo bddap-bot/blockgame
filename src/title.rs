@@ -45,6 +45,9 @@ pub enum Playing {
     #[default]
     Live,
     Paused,
+    /// The crafting rig is up: the world is still there behind it, and the player is
+    /// looking at what things are made of instead of at what they are standing on.
+    Forge,
 }
 
 /// What the player asked for before there was a world.

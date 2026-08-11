@@ -297,6 +297,39 @@ pub fn gather_menu_intent(
     *menu = out;
 }
 
+/// The crafting rig's read of the same devices.
+///
+/// The d-pad walks the rig exactly as it walks the hotbar — left and right along a row,
+/// up and down between rows — because that is the one thing a player who cannot read the
+/// buttons has already been taught. X still means "make one" and B still means "back
+/// out", so no button changes meaning on the way in.
+pub fn gather_forge_nav(
+    keys: Res<ButtonInput<KeyCode>>,
+    pads: Query<&Gamepad>,
+    mut nav: ResMut<crate::forge::Nav>,
+) {
+    let key_step = |neg: KeyCode, pos: KeyCode| {
+        keys.just_pressed(pos) as i32 - keys.just_pressed(neg) as i32
+    };
+    let mut out = crate::forge::Nav {
+        across: key_step(KeyCode::ArrowLeft, KeyCode::ArrowRight) + key_step(KEYS.left, KEYS.right),
+        down: key_step(KeyCode::ArrowUp, KeyCode::ArrowDown) + key_step(KEYS.forward, KEYS.back),
+        focus: keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::Space),
+        craft: keys.just_pressed(KEYS.craft),
+        leave: keys.just_pressed(KEYS.pause) || keys.just_pressed(KEYS.ride),
+    };
+
+    for pad in &pads {
+        out.across += pad.just_pressed(PAD.next_item) as i32 - pad.just_pressed(PAD.prev_item) as i32;
+        out.down += pad.just_pressed(PAD.next_row) as i32 - pad.just_pressed(PAD.prev_row) as i32;
+        out.focus |= pad.just_pressed(PAD.jump);
+        out.craft |= pad.just_pressed(PAD.craft);
+        out.leave |= pad.just_pressed(PAD.ride) || pad.just_pressed(PAD.pause);
+    }
+
+    *nav = out;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

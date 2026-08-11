@@ -6,10 +6,12 @@
 //! living room and the last thing anybody reads, and the pause menu shares the ticket
 //! on request anyway.
 //!
-//! The hotbar is also the crafting menu. There is no second screen to open, no grid to
-//! arrange and no order to get right — you walk the cursor onto a thing and press craft,
-//! and the line above the hotbar tells you what it costs and whether you can afford it.
-//! That is the whole mechanism, and it is the one a six-year-old can be shown once.
+//! The hotbar is what you are *carrying*. What things are made of is [`crate::forge`]'s,
+//! and the craft button is what takes you there — so the line above the hotbar says what
+//! the thing in your hand does and what it would cost, and the recipe itself is somewhere
+//! a child who cannot read the line can still get at.
+//!
+//! All of this is words, which is why the rig puts it away while it is up ([`HudRoot`]).
 //!
 //! Every cell comes from [`Item::ALL`], so an item added to the registry appears here with
 //! no change to this file.
@@ -34,6 +36,26 @@ const RING: f32 = 3.0;
 /// its pixels, and [`scale_to_screen`] scales them to the panel actually in front of the
 /// player.
 const DESIGN_ROWS: f32 = 800.0;
+
+/// A top-level piece of the HUD. Marked so the crafting rig can put the whole overlay
+/// away in one query: the rig says everything it has to say in shapes, and a hotbar full
+/// of words behind it would be the one thing on screen a non-reader is shut out of.
+#[derive(Component)]
+pub struct HudRoot;
+
+/// Shows or hides the whole overlay.
+pub fn show(hud: &mut Query<&mut Visibility, With<HudRoot>>, visible: bool) {
+    let want = if visible {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    for mut v in hud.iter_mut() {
+        if *v != want {
+            *v = want;
+        }
+    }
+}
 
 /// What the cursor is on and what it costs, directly above the hotbar.
 #[derive(Component)]
@@ -76,13 +98,16 @@ pub struct HotbarLabel(Item);
 pub fn setup(mut commands: Commands) {
     // Crosshair. Sized for the Deck's 1280x800 panel, where a 1px reticle disappears.
     commands
-        .spawn(Node {
-            width: Val::Percent(100.0),
-            height: Val::Percent(100.0),
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            ..default()
-        })
+        .spawn((
+            HudRoot,
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+        ))
         .with_children(|ui| {
             ui.spawn((
                 Text::new("+"),
@@ -96,6 +121,7 @@ pub fn setup(mut commands: Commands) {
 
     // Top centre, where the eye already is — and empty the rest of the time.
     commands.spawn((
+        HudRoot,
         NoticeText,
         Text::new(""),
         TextFont {
@@ -119,15 +145,18 @@ pub fn setup(mut commands: Commands) {
     ));
 
     commands
-        .spawn(Node {
-            position_type: PositionType::Absolute,
-            bottom: Val::Px(16.0),
-            width: Val::Percent(100.0),
-            flex_direction: FlexDirection::Column,
-            align_items: AlignItems::Center,
-            row_gap: Val::Px(6.0),
-            ..default()
-        })
+        .spawn((
+            HudRoot,
+            Node {
+                position_type: PositionType::Absolute,
+                bottom: Val::Px(16.0),
+                width: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                row_gap: Val::Px(6.0),
+                ..default()
+            },
+        ))
         .with_children(|hud| {
             // On its own dark plate: this line is read against whatever the player
             // happens to be looking at, and a sunlit sand cliff swallows white text.

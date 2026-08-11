@@ -38,7 +38,7 @@ pub struct Part {
     pub at: [f32; 3],
 }
 
-const fn part(skin: Skin, size: [f32; 3], at: [f32; 3]) -> Part {
+pub const fn part(skin: Skin, size: [f32; 3], at: [f32; 3]) -> Part {
     Part { skin, size, at }
 }
 
@@ -197,6 +197,17 @@ impl Palette {
             dark: paint(Color::srgb(0.06, 0.09, 0.12), 0.25),
             items,
         }
+    }
+
+    /// The unit cube every model in the game is built out of, and the paint to put on
+    /// one. Public because [`crate::forge`] builds its silhouettes from part tables like
+    /// the ones here, and a second cube mesh beside this one is a second model pipeline.
+    pub fn cube(&self) -> Handle<Mesh> {
+        self.cube.clone()
+    }
+
+    pub fn paint(&self, skin: Skin) -> Handle<StandardMaterial> {
+        self.material(skin)
     }
 
     fn material(&self, skin: Skin) -> Handle<StandardMaterial> {

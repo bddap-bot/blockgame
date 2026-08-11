@@ -2,7 +2,7 @@
 //! joining.
 //!
 //! [`Role`] is consulted only where authority differs: [`authorized`] (whose word counts),
-//! [`submit_edit`] and [`craft_on_request`] (who may change the world and who may spend a
+//! [`submit_edit`] and [`open_forge`] (who may change the world and who may spend a
 //! pile), [`net_receive`] (who relays), and [`run`] (which of the two the player is told
 //! they are). Everything else is role-blind, which is what "single player is multiplayer
 //! with zero peers" has to mean if it is going to stay true.
@@ -13,8 +13,11 @@ use bevy::window::{CursorGrabMode, CursorOptions, MonitorSelection, PrimaryWindo
 use std::collections::{HashMap, HashSet};
 
 use crate::avatar;
+use crate::forge;
 use crate::hud;
-use crate::input::{Intent, MenuIntent, PITCH_LIMIT, gather_intent, gather_menu_intent};
+use crate::input::{
+    Intent, MenuIntent, PITCH_LIMIT, gather_forge_nav, gather_intent, gather_menu_intent,
+};
 use crate::inventory::{Held, Inventories, Inventory};
 use crate::mesh::{ChunkMesh, build_chunk_mesh};
 use crate::net::wire::CarPose;
@@ -246,6 +249,9 @@ pub fn run(start: Start) -> anyhow::Result<()> {
     .add_sub_state::<Playing>()
     .init_resource::<Intent>()
     .init_resource::<MenuIntent>()
+    .init_resource::<forge::Nav>()
+    .init_resource::<forge::Stock>()
+    .init_resource::<forge::CraftRequests>()
     .init_resource::<Held>()
     .init_resource::<Chunks>()
     .init_resource::<Digging>()
@@ -265,7 +271,10 @@ pub fn run(start: Start) -> anyhow::Result<()> {
     // frame late, so the Escape that opened the pause menu was still "just pressed" on
     // the frame the menu came up and closed it again within it. The menu was
     // unreachable and nothing was on fire.
-    .add_systems(PreUpdate, gather_menu_intent.after(InputSystems))
+    .add_systems(
+        PreUpdate,
+        (gather_menu_intent, gather_forge_nav).after(InputSystems),
+    )
     // Every screen the game draws is sized for the Deck's 800 rows, the title included, so
     // this runs whatever phase we are in and not just once: a TV that changes mode under
     // us is a resize like any other.
@@ -295,6 +304,24 @@ pub fn run(start: Start) -> anyhow::Result<()> {
             .chain()
             .run_if(in_state(Playing::Paused)),
     )
+    .add_systems(OnEnter(Playing::Forge), (forge::enter, let_go_of_the_mouse))
+    .add_systems(OnExit(Playing::Forge), undress_the_forge)
+    .add_systems(
+        // The same order every frame the rig is up: read the pad, take the pile as it
+        // stands, act on it, build what the graph now needs, then move what moves.
+        Update,
+        (
+            dress_the_forge,
+            forge::drive,
+            submit_forge_crafts,
+            forge::rebuild,
+            forge::react,
+            forge::animate,
+            close_forge,
+        )
+            .chain()
+            .run_if(in_state(Playing::Forge)),
+    )
     .add_systems(
         Update,
         (
@@ -310,7 +337,7 @@ pub fn run(start: Start) -> anyhow::Result<()> {
             draw_cars,
             target_and_edit,
             aim_zoom,
-            craft_on_request,
+            open_forge.run_if(in_state(Playing::Live)),
             stream_chunks,
             remesh_dirty,
             net_send_pose,
@@ -964,20 +991,74 @@ fn aim_zoom(
 
 /// The local player's craft button. Like an edit, it is a *request*: the host owns every
 /// pile, so a peer asks and waits to be told what it has.
-fn craft_on_request(
+/// The craft button in the world opens the rig, on whatever the hotbar cursor is on.
+///
+/// Making a thing is one press *inside* the rig now, not one press outside it: there is
+/// one place a recipe is paid, and it is the place the recipe is drawn.
+fn open_forge(
     intent: Res<Intent>,
     held: Res<Held>,
-    role: Res<NetRole>,
     session: NonSend<Session>,
-    mut inventories: ResMut<Inventories>,
+    inventories: Res<Inventories>,
+    mut commands: Commands,
+    mut playing: ResMut<NextState<Playing>>,
 ) {
     if !intent.craft {
         return;
     }
-    match role.0 {
-        Role::Host => submit_craft(&session, &mut inventories, session.me(), held.0),
-        Role::Peer { .. } => session.send(Target::All, Msg::Craft { item: held.0 }),
+    commands.insert_resource(forge::Forge::new(
+        held.0,
+        inventories.of(session.me()).clone(),
+    ));
+    playing.set(Playing::Forge);
+}
+
+/// Hands the rig the pile it draws, and hides the words while it is up.
+fn dress_the_forge(
+    session: NonSend<Session>,
+    inventories: Res<Inventories>,
+    mut stock: ResMut<forge::Stock>,
+    mut hud: Query<&mut Visibility, With<hud::HudRoot>>,
+) {
+    let mine = inventories.of(session.me());
+    if stock.0 != *mine {
+        stock.0 = mine.clone();
     }
+    hud::show(&mut hud, false);
+}
+
+/// Puts the rig's craft requests through the same door the hotbar's used: the host pays
+/// them, a peer asks the host to.
+fn submit_forge_crafts(
+    role: Res<NetRole>,
+    session: NonSend<Session>,
+    mut requests: ResMut<forge::CraftRequests>,
+    mut inventories: ResMut<Inventories>,
+) {
+    for item in requests.0.drain(..).collect::<Vec<_>>() {
+        match role.0 {
+            Role::Host => submit_craft(&session, &mut inventories, session.me(), item),
+            Role::Peer { .. } => session.send(Target::All, Msg::Craft { item }),
+        }
+    }
+}
+
+fn close_forge(nav: Res<forge::Nav>, mut playing: ResMut<NextState<Playing>>) {
+    if nav.leave {
+        playing.set(Playing::Live);
+    }
+}
+
+/// Back to the world: the rig goes away and the words come back.
+fn undress_the_forge(
+    mut commands: Commands,
+    rig: Query<Entity, With<forge::Rig>>,
+    mut hud: Query<&mut Visibility, With<hud::HudRoot>>,
+    mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>,
+) {
+    forge::leave(commands.reborrow(), rig);
+    hud::show(&mut hud, true);
+    grab_mouse(&mut cursor, true);
 }
 
 /// Where everybody is: this player, plus the last pose each peer sent. What the placement
@@ -2381,4 +2462,16 @@ mod tests {
         let host_saw = host_side.join().expect("the host side");
         assert_eq!(host_saw, HashSet::from([b_id]), "the host's own set");
     }
+}
+
+/// The rig is read, not aimed at: the mouse comes back so a player on a keyboard is not
+/// spinning the world behind it while they walk the graph.
+fn let_go_of_the_mouse(
+    mut intent: ResMut<Intent>,
+    mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>,
+) {
+    // Same reason the pause menu does it: a walk in progress has to be let go of, or the
+    // player steps off a cliff while looking at what a car is made of.
+    *intent = Intent::default();
+    grab_mouse(&mut cursor, false);
 }

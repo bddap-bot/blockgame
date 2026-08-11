@@ -23,6 +23,10 @@ pkgs.mkShell {
     libxcursor
     libxi
     libxrandr
+
+    # A display to render into on a machine that has none — what `blockgame portrait`
+    # and `blockgame craft-film` are run under on the build box.
+    xvfb-run
   ];
 
   LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (with pkgs; [
