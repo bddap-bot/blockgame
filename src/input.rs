@@ -300,6 +300,69 @@ pub fn gather_menu_intent(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::input::InputPlugin;
+    use bevy::input::gamepad::{
+        GamepadConnection, GamepadConnectionEvent, RawGamepadButtonChangedEvent, RawGamepadEvent,
+    };
+
+    /// An app with `count` pads plugged in and nothing else — the TV's shape at `count` of
+    /// 2, where one controller arrives as two devices.
+    fn with_pads(count: usize) -> (App, Vec<Entity>) {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, InputPlugin))
+            .init_resource::<Intent>()
+            .add_systems(Update, gather_intent);
+
+        let pads: Vec<Entity> = (0..count)
+            .map(|_| {
+                let pad = app.world_mut().spawn_empty().id();
+                app.world_mut().write_message(GamepadConnectionEvent::new(
+                    pad,
+                    GamepadConnection::Connected {
+                        name: "test pad".to_string(),
+                        vendor_id: None,
+                        product_id: None,
+                    },
+                ));
+                pad
+            })
+            .collect();
+        app.update();
+        (app, pads)
+    }
+
+    /// Presses `button` on every pad at once, as two devices wrapping one controller do,
+    /// and reports what the hotbar was asked to do about it.
+    fn press(app: &mut App, pads: &[Entity], button: GamepadButton) -> i32 {
+        for pad in pads {
+            app.world_mut().write_message(RawGamepadEvent::Button(
+                RawGamepadButtonChangedEvent::new(*pad, button, 1.0),
+            ));
+        }
+        app.update();
+        app.world().resource::<Intent>().item_delta
+    }
+
+    /// The TV bug: Steam Input's virtual pad and the controller it wraps both report the
+    /// press, and the hotbar cursor moved two cells for one thumb. One press is one cell,
+    /// however many devices saw it — and a row jump is one row, not two.
+    #[test]
+    fn one_press_moves_the_hotbar_one_cell_however_many_pads_report_it() {
+        for pads in [1, 2, 3] {
+            let (mut app, ids) = with_pads(pads);
+            assert_eq!(
+                press(&mut app, &ids, PAD.next_item),
+                1,
+                "{pads} pad(s) reporting one press"
+            );
+            let (mut app, ids) = with_pads(pads);
+            assert_eq!(
+                press(&mut app, &ids, PAD.next_row),
+                HOTBAR_COLUMNS as i32,
+                "{pads} pad(s) reporting one row jump"
+            );
+        }
+    }
 
     #[test]
     fn deadzone_kills_stick_drift_but_not_real_input() {
