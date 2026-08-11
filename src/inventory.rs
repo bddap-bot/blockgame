@@ -9,7 +9,7 @@
 //! over the wire. A client never adds to its own pile — the same rule as blocks, for the
 //! same reason: a local guess has to be rolled back the moment the host disagrees.
 
-use bevy::prelude::Resource;
+use bevy::prelude::{Message, Resource};
 use std::collections::HashMap;
 
 use crate::net::PlayerId;
@@ -57,24 +57,67 @@ impl Inventory {
         }
     }
 
-    /// Is every ingredient on the shelf? An item with no recipe is never craftable — you
-    /// go and find grass, you do not conjure it out of an empty hand.
-    pub fn can_craft(&self, item: Item) -> bool {
-        let recipe = item.recipe();
-        !recipe.is_empty() && recipe.iter().all(|(g, n)| self.count(*g) >= *n)
-    }
-
     /// Spends the recipe and adds one. False, and nothing spent, if anything is missing.
-    pub fn craft(&mut self, item: Item) -> bool {
-        if !self.can_craft(item) {
+    ///
+    /// One step, and not the question a player ever asks: an item with no recipe is never
+    /// craftable — you go and find grass, you do not conjure it out of an empty hand — and
+    /// making a car out of a hillside is [`Inventory::build`] running a whole run of these.
+    fn craft(&mut self, item: Item) -> bool {
+        let recipe = item.recipe();
+        if recipe.is_empty() || !recipe.iter().all(|(g, n)| self.count(*g) >= *n) {
             return false;
         }
-        for (ingredient, n) in item.recipe() {
+        for (ingredient, n) in recipe {
             let paid = self.take(*ingredient, *n);
-            debug_assert!(paid, "can_craft said this was affordable");
+            debug_assert!(paid, "the shelf was just counted");
         }
         self.add(item, 1);
         true
+    }
+
+    /// Everything that has to happen for this player to end up holding one `want`.
+    ///
+    /// The whole recipe graph is walked, not just the top row: asking for a car with ten
+    /// stone and six wood in the pocket comes back with eight nails and then the car,
+    /// because a child who has to be told "make eight nails first" is a child reading a
+    /// recipe rather than building a car.
+    ///
+    /// What is already on the shelf is spent before anything is made — the nail you have
+    /// is a nail you do not make — and the requested item itself is always made fresh,
+    /// which is what asking to craft one means.
+    pub fn plan(&self, want: Item) -> Plan {
+        let mut shelf = self.clone();
+        let mut plan = Plan::default();
+        if want.recipe().is_empty() {
+            // Nothing makes grass. The shortfall *is* the request, which is what the
+            // screen draws as "go and dig this up".
+            plan.short.push((want, 1));
+            return plan;
+        }
+        for (ingredient, n) in want.recipe() {
+            for _ in 0..*n {
+                obtain(&mut shelf, *ingredient, &mut plan);
+            }
+        }
+        plan.steps.push(want);
+        plan
+    }
+
+    /// Runs [`Inventory::plan`] to the end, or changes nothing at all.
+    ///
+    /// All-or-nothing for the same reason [`Inventory::craft`] is: a child who asks for a
+    /// car and gets six nails and no car has been charged for something they did not get.
+    /// Returns what was made, in the order it was made, which is what the screen replays.
+    pub fn build(&mut self, want: Item) -> Vec<Item> {
+        let plan = self.plan(want);
+        if !plan.short.is_empty() {
+            return Vec::new();
+        }
+        for step in &plan.steps {
+            let made = self.craft(*step);
+            debug_assert!(made, "the plan said {step:?} was affordable by now");
+        }
+        plan.steps
     }
 
     /// What is actually in this player's hand: the item they have selected, or nothing if
@@ -137,6 +180,44 @@ impl Inventory {
     }
 }
 
+/// What it takes to make one of something, out of what a player already has.
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub struct Plan {
+    /// Every craft to run, in an order each of them can be paid for. The thing that was
+    /// asked for is the last one.
+    pub steps: Vec<Item>,
+    /// What ran out on the way: the gathered things to go and dig up, and how many more of
+    /// each. Empty means the plan can be run right now.
+    pub short: Vec<(Item, u32)>,
+}
+
+/// Takes one `item` off the shelf, making it — and whatever *it* is made of — if the shelf
+/// has none.
+///
+/// Recursion terminates because a recipe cannot reach itself, which
+/// `registry::no_recipe_depends_on_itself` is what keeps true; a cycle added to the table
+/// fails that test long before it reaches a player.
+fn obtain(shelf: &mut Inventory, item: Item, plan: &mut Plan) {
+    if shelf.take(item, 1) {
+        return;
+    }
+    if item.recipe().is_empty() {
+        match plan.short.iter_mut().find(|(short, _)| *short == item) {
+            Some((_, n)) => *n += 1,
+            None => plan.short.push((item, 1)),
+        }
+        return;
+    }
+    for (ingredient, n) in item.recipe() {
+        for _ in 0..*n {
+            obtain(shelf, *ingredient, plan);
+        }
+    }
+    // Made and spent in the same breath: the caller wanted one in order to use it, so it
+    // never reaches the shelf and there is nothing to take back off.
+    plan.steps.push(item);
+}
+
 /// Every inventory the game knows about, keyed by whose it is.
 ///
 /// On the host that is everybody's, because the host is the one whose word decides what
@@ -153,6 +234,23 @@ impl Inventories {
         self.0.get(&who).unwrap_or(&Inventory::EMPTY)
     }
 }
+
+/// Somebody asked to be made one of these, whatever it takes.
+///
+/// Written by the screen the player pressed the button on and read by whoever is entitled
+/// to spend a pile — the host, or a peer's request to one. A message rather than a call, so
+/// the screen that asks does not have to know which of those it is talking to.
+#[derive(Message, Debug, Clone, Copy)]
+pub struct Craft(pub Item);
+
+/// Whose things the screen in front of this player is showing.
+///
+/// The [`crate::net::Session`] is the authority on it and this is read off the session the
+/// moment there is a world, once, because a player's id never changes for the life of a
+/// session. It exists so that a screen only wants to know "what do *I* have" does not have
+/// to hold the network to ask.
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct Whoami(pub PlayerId);
 
 /// Which item the local player has selected — the hotbar cursor.
 ///
@@ -194,13 +292,12 @@ mod tests {
     #[test]
     fn crafting_spends_the_recipe_and_makes_one() {
         let mut inv = Inventory::default();
-        assert!(!inv.can_craft(Item::Hammer), "empty-handed");
         assert!(!inv.craft(Item::Hammer));
 
         for (ingredient, n) in Item::Hammer.recipe() {
             inv.add(*ingredient, *n);
         }
-        assert!(inv.can_craft(Item::Hammer));
+
         assert!(inv.craft(Item::Hammer));
         assert_eq!(inv.count(Item::Hammer), 1);
         for (ingredient, _) in Item::Hammer.recipe() {
@@ -229,11 +326,93 @@ mod tests {
         let mut inv = Inventory::default();
         for item in Item::ALL {
             if item.recipe().is_empty() {
-                assert!(!inv.can_craft(*item), "{item:?} is made from nothing");
-                assert!(!inv.craft(*item));
+                assert!(!inv.craft(*item), "{item:?} is made from nothing");
+                assert!(
+                    inv.build(*item).is_empty(),
+                    "{item:?} was built out of nothing"
+                );
             }
         }
         assert_eq!(inv, Inventory::default());
+    }
+
+    /// The whole point of planning: a pocket full of rock and timber is a car, and nobody
+    /// has to be told that eight nails come first.
+    #[test]
+    fn a_plan_makes_what_the_recipe_needs_before_it_needs_it() {
+        let mut inv = Inventory::default();
+        inv.add(Item::Wood, 6);
+        inv.add(Item::Stone, 10);
+
+        let plan = inv.plan(Item::Car);
+        assert!(plan.short.is_empty(), "ten stone and six wood is a car");
+        assert_eq!(plan.steps, [vec![Item::Nail; 8], vec![Item::Car]].concat());
+        for (i, step) in plan.steps.iter().enumerate() {
+            assert!(
+                inv.craft(*step),
+                "step {i} ({step:?}) could not be paid for"
+            );
+        }
+        assert_eq!(inv.count(Item::Car), 1);
+        assert_eq!(inv.count(Item::Stone), 0, "every stone went into a nail");
+    }
+
+    /// What is already on the shelf is spent before anything is made. A child who spent
+    /// the afternoon making nails must not watch the game make eight more.
+    #[test]
+    fn a_plan_spends_what_you_already_have() {
+        let mut inv = Inventory::default();
+        inv.add(Item::Wood, 6);
+        inv.add(Item::Stone, 2);
+        inv.add(Item::Nail, 8);
+        assert_eq!(
+            inv.plan(Item::Car).steps,
+            vec![Item::Car],
+            "nothing to make"
+        );
+    }
+
+    /// Short of the raw stuff, the plan says *what to go and dig up* and how much more of
+    /// it — the only thing a player who cannot read the recipe can act on.
+    #[test]
+    fn a_plan_counts_what_is_missing_right_down_to_the_ground() {
+        let inv = Inventory::default();
+        let plan = inv.plan(Item::Car);
+        assert_eq!(
+            plan.short,
+            vec![(Item::Wood, 6), (Item::Stone, 10)],
+            "six wood, and ten stone: two for the frame and one for each nail"
+        );
+        assert_eq!(
+            Inventory::default().plan(Item::Grass).short,
+            vec![(Item::Grass, 1)],
+            "nothing makes grass — you go and find it"
+        );
+    }
+
+    /// All-or-nothing, over the whole chain: a refused build must leave the pile exactly
+    /// as it was, half-made nails included.
+    #[test]
+    fn a_build_you_cannot_afford_spends_nothing() {
+        let mut inv = Inventory::default();
+        inv.add(Item::Stone, 40);
+        let before = inv.clone();
+        assert!(inv.build(Item::Car).is_empty(), "no wood");
+        assert_eq!(inv, before);
+    }
+
+    /// One press, and the thing is in your hand — every intermediate step run, and only
+    /// the intermediates that were actually needed left over.
+    #[test]
+    fn one_build_walks_the_whole_graph() {
+        let mut inv = Inventory::default();
+        inv.add(Item::Wood, 6);
+        inv.add(Item::Stone, 10);
+        let made = inv.build(Item::Car);
+        assert_eq!(made.last(), Some(&Item::Car));
+        assert_eq!(made.len(), 9, "eight nails and the car");
+        assert_eq!(inv.count(Item::Car), 1);
+        assert_eq!(inv.count(Item::Nail), 0, "every nail went into the car");
     }
 
     /// The long way round the requirement sheet: dig, make nails, make a car. It is the

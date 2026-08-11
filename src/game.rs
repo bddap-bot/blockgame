@@ -15,13 +15,14 @@ use std::collections::{HashMap, HashSet};
 use crate::avatar;
 use crate::hud;
 use crate::input::{Intent, MenuIntent, PITCH_LIMIT, gather_intent, gather_menu_intent};
-use crate::inventory::{Held, Inventories, Inventory};
+use crate::inventory::{Craft, Held, Inventories, Inventory, Whoami};
 use crate::mesh::{ChunkMesh, build_chunk_mesh};
 use crate::net::wire::CarPose;
 use crate::net::{Boot, Event, Msg, PlayerId, Pose, Role, Session, Target, lan};
 use crate::pause;
 use crate::player::{self, Player};
 use crate::raycast;
+use crate::recipes;
 use crate::registry::{Block, Class, Item, Use};
 use crate::ticket::Share;
 use crate::title::{self, Booted, Phase, Playing, Start};
@@ -255,6 +256,7 @@ pub fn run(start: Start) -> anyhow::Result<()> {
     .init_resource::<Welcomed>()
     .init_resource::<WorldBudget>()
     .init_resource::<hud::Notice>()
+    .add_message::<Craft>()
     .insert_non_send_resource(Booted::default())
     .insert_non_send_resource(Share::default())
     // Menus read the pad every frame, whichever one is up and whether one is up at all:
@@ -295,6 +297,14 @@ pub fn run(start: Start) -> anyhow::Result<()> {
             .chain()
             .run_if(in_state(Playing::Paused)),
     )
+    .add_systems(OnEnter(Playing::Crafting), recipes::open)
+    .add_systems(OnExit(Playing::Crafting), recipes::close)
+    .add_systems(
+        Update,
+        (recipes::drive, recipes::redraw)
+            .chain()
+            .run_if(in_state(Playing::Crafting)),
+    )
     .add_systems(
         Update,
         (
@@ -316,7 +326,7 @@ pub fn run(start: Start) -> anyhow::Result<()> {
             net_send_pose,
             hud::update_hotbar,
             hud::fade_notice,
-            open_pause_menu.run_if(in_state(Playing::Live)),
+            (open_pause_menu, open_recipe_screen).run_if(in_state(Playing::Live)),
         )
             .chain()
             .run_if(in_state(Phase::World)),
@@ -354,6 +364,7 @@ fn enter_world(mut commands: Commands, mut booted: NonSendMut<Booted>) {
     }
 
     commands.insert_resource(Sim(world));
+    commands.insert_resource(Whoami(session.me()));
     commands.insert_resource(Me(Player::spawn_at(spawn)));
     commands.insert_resource(NetRole(role));
     if let Some(beacon) = beacon {
@@ -380,6 +391,15 @@ fn answer_join_questions(beacon: Option<Res<Beacon>>, session: NonSend<Session>)
 fn open_pause_menu(intent: Res<Intent>, mut playing: ResMut<NextState<Playing>>) {
     if intent.pause {
         playing.set(Playing::Paused);
+    }
+}
+
+/// The craft button opens the recipe screen rather than making one where the player is
+/// standing. Crafting walks a graph now — eight nails and then a car — and a graph needs a
+/// screen to walk it on.
+fn open_recipe_screen(intent: Res<Intent>, mut playing: ResMut<NextState<Playing>>) {
+    if intent.craft {
+        playing.set(Playing::Crafting);
     }
 }
 
@@ -813,12 +833,16 @@ fn announce_inventory(session: &Session, who: PlayerId, inventory: &Inventory) {
     }
 }
 
-/// The host's half of a craft: pay the recipe out of that player's pile and hand them the
-/// thing. Every rule lives in [`Inventory::craft`], so a modified client asking for a free
-/// car gets what an honest one would — nothing, unless the nails are there.
+/// The host's half of a craft: run the whole plan out of that player's pile and hand them
+/// the thing. Every rule lives in [`Inventory::build`], so a modified client asking for a
+/// free car gets what an honest one would — nothing, unless the stone is there.
+///
+/// One request, however many steps: asking for a car with a pocket full of rock makes the
+/// eight nails on the way. All-or-nothing, so there is no half-built pile for a refused
+/// request to leave behind.
 fn submit_craft(session: &Session, inventories: &mut Inventories, who: PlayerId, item: Item) {
     let inventory = inventories.0.entry(who).or_default();
-    if inventory.craft(item) {
+    if !inventory.build(item).is_empty() {
         announce_inventory(session, who, inventory);
     }
 }
@@ -965,18 +989,16 @@ fn aim_zoom(
 /// The local player's craft button. Like an edit, it is a *request*: the host owns every
 /// pile, so a peer asks and waits to be told what it has.
 fn craft_on_request(
-    intent: Res<Intent>,
-    held: Res<Held>,
+    mut asked: MessageReader<Craft>,
     role: Res<NetRole>,
     session: NonSend<Session>,
     mut inventories: ResMut<Inventories>,
 ) {
-    if !intent.craft {
-        return;
-    }
-    match role.0 {
-        Role::Host => submit_craft(&session, &mut inventories, session.me(), held.0),
-        Role::Peer { .. } => session.send(Target::All, Msg::Craft { item: held.0 }),
+    for Craft(item) in asked.read() {
+        match role.0 {
+            Role::Host => submit_craft(&session, &mut inventories, session.me(), *item),
+            Role::Peer { .. } => session.send(Target::All, Msg::Craft { item: *item }),
+        }
     }
 }
 

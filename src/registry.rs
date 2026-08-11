@@ -11,7 +11,7 @@
 //!
 //! The two meet in [`Class::Block`]: an item of that class is a voxel you place, and it
 //! takes its colour from the voxel, so a hotbar cell can never disagree with what it puts
-//! in the world. Everything else — tools, components, equippables, vehicles — is an item
+//! in the world. Everything else — tools, parts, equippables, vehicles — is an item
 //! and nothing more.
 //!
 //! **Adding content is a localised diff.** A new block: a [`Block`] variant, a [`Block::def`]
@@ -279,7 +279,7 @@ pub enum Class {
     /// Swung or fired at the world. Linear RGB, as everywhere else in this file.
     Tool { color: [f32; 3], using: Use },
     /// Not used on its own — spent making something else.
-    Component { color: [f32; 3] },
+    Part { color: [f32; 3] },
     /// Held out, and changes how its holder falls.
     Equippable { color: [f32; 3], falling: Fall },
     /// Ridden.
@@ -287,15 +287,67 @@ pub enum Class {
 }
 
 impl Class {
+    /// Which kind of thing this is, with the payload stripped.
+    pub fn kind(self) -> Kind {
+        match self {
+            Class::Block(_) => Kind::Block,
+            Class::Tool { .. } => Kind::Tool,
+            Class::Part { .. } => Kind::Part,
+            Class::Equippable { .. } => Kind::Wearable,
+            Class::Vehicle { .. } => Kind::Vehicle,
+        }
+    }
+
     /// The word the HUD shows under an item's name.
     pub fn word(self) -> &'static str {
+        self.kind().word()
+    }
+}
+
+/// [`Class`] with the payload taken off: what kind of thing an item is, and nothing about
+/// the particular thing.
+///
+/// It exists because a player sorting through fourteen items sorts by kind first — every
+/// cube together, every gun together — and a class carrying a colour and a range cannot be
+/// compared, listed, or drawn as a heading. [`Class::kind`] is the only way to get one, so
+/// the two lists cannot disagree about what a rifle is.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Kind {
+    Block,
+    Part,
+    Tool,
+    Wearable,
+    Vehicle,
+}
+
+impl Kind {
+    /// Every kind, in the order a menu offers them: what you dig up first, then what you
+    /// make out of it, ending at the one thing you drive.
+    pub const ALL: &'static [Kind] = &[
+        Kind::Block,
+        Kind::Part,
+        Kind::Tool,
+        Kind::Wearable,
+        Kind::Vehicle,
+    ];
+
+    pub fn word(self) -> &'static str {
         match self {
-            Class::Block(_) => "block",
-            Class::Tool { .. } => "tool",
-            Class::Component { .. } => "part",
-            Class::Equippable { .. } => "wearable",
-            Class::Vehicle { .. } => "vehicle",
+            Kind::Block => "block",
+            Kind::Part => "part",
+            Kind::Tool => "tool",
+            Kind::Wearable => "wearable",
+            Kind::Vehicle => "vehicle",
         }
+    }
+
+    /// Everything of this kind, in hotbar order.
+    pub fn items(self) -> Vec<Item> {
+        Item::ALL
+            .iter()
+            .copied()
+            .filter(|i| i.class().kind() == self)
+            .collect()
     }
 }
 
@@ -409,7 +461,7 @@ impl Item {
             },
             Item::Nail => ItemDef {
                 name: "nail",
-                class: Component {
+                class: Part {
                     color: [0.62, 0.63, 0.66],
                 },
                 recipe: &[(Item::Stone, 1)],
@@ -532,7 +584,7 @@ impl Item {
             Class::Block(b) => b.soft().then(|| "soft to land on".to_string()),
             Class::Tool { using, .. } => using.summary(),
             Class::Equippable { falling, .. } => falling.summary(),
-            Class::Component { .. } | Class::Vehicle { .. } => None,
+            Class::Part { .. } | Class::Vehicle { .. } => None,
         }
     }
 
@@ -565,7 +617,7 @@ impl Item {
         match self.class() {
             Class::Block(b) => b.color(),
             Class::Tool { color, .. }
-            | Class::Component { color }
+            | Class::Part { color }
             | Class::Equippable { color, .. }
             | Class::Vehicle { color } => color,
         }
@@ -794,7 +846,7 @@ mod tests {
             );
         }
         assert!(
-            matches!(Item::Nail.class(), Class::Component { .. }),
+            matches!(Item::Nail.class(), Class::Part { .. }),
             "a nail is spent in recipes and never swung"
         );
     }
@@ -900,6 +952,23 @@ mod tests {
         assert_eq!(Item::Cushion.summary().unwrap(), "soft to land on");
         assert_eq!(Item::Parachute.summary().unwrap(), "floats down and steers");
         assert_eq!(Item::Car.summary(), None, "a car is not about falling");
+    }
+
+    /// Every item belongs to exactly one kind, and every kind has something in it — an
+    /// empty key on the code pad is a press that does nothing and teaches nothing.
+    #[test]
+    fn the_kinds_partition_the_items() {
+        let mut sorted: Vec<Item> = Kind::ALL.iter().flat_map(|k| k.items()).collect();
+        assert_eq!(sorted.len(), Item::COUNT, "an item in two kinds, or none");
+        sorted.sort_by_key(|i| i.index());
+        assert_eq!(
+            sorted,
+            Item::ALL,
+            "the kinds and the hotbar hold the same set"
+        );
+        for kind in Kind::ALL {
+            assert!(!kind.items().is_empty(), "{kind:?} has nothing in it");
+        }
     }
 
     #[test]

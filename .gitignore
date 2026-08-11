@@ -1,1 +1,4 @@
 /target
+# Scratch from `blockgame reel`: the frames the GIF under docs/design is made of.
+/frames
+*.log

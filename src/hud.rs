@@ -6,10 +6,10 @@
 //! living room and the last thing anybody reads, and the pause menu shares the ticket
 //! on request anyway.
 //!
-//! The hotbar is also the crafting menu. There is no second screen to open, no grid to
-//! arrange and no order to get right — you walk the cursor onto a thing and press craft,
-//! and the line above the hotbar tells you what it costs and whether you can afford it.
-//! That is the whole mechanism, and it is the one a six-year-old can be shown once.
+//! The hotbar is everything there is to hold, and the line above it says what the thing
+//! under the cursor is made of and whether the whole chain down to the ground is within
+//! reach. Making one is [`crate::recipes`]' screen, which the craft button opens — this
+//! file says what a thing costs; that one is where it is paid for.
 //!
 //! Every cell comes from [`Item::ALL`], so an item added to the registry appears here with
 //! no change to this file.
@@ -17,8 +17,7 @@
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
-use crate::inventory::{Held, Inventories};
-use crate::net::Session;
+use crate::inventory::{Held, Inventories, Whoami};
 use crate::registry::{Class, HOTBAR_COLUMNS, Item};
 
 /// Cell size, in the Deck's 1280x800 pixels. Seven of these across is 766px — wide enough
@@ -264,7 +263,7 @@ pub fn fade_notice(
 pub fn update_hotbar(
     held: Res<Held>,
     inventories: Res<Inventories>,
-    session: NonSend<Session>,
+    me: Res<Whoami>,
     mut cells: Query<(
         &HotbarLabel,
         &mut Text,
@@ -274,7 +273,7 @@ pub fn update_hotbar(
     mut rings: Query<(&HotbarCell, &mut BackgroundColor), Without<HotbarLabel>>,
     mut recipe: Query<(&mut Text, &mut TextColor), (With<RecipeText>, Without<HotbarLabel>)>,
 ) {
-    let inventory = inventories.of(session.me());
+    let inventory = inventories.of(me.0);
 
     for (cell, mut text, mut color, mut background) in &mut cells {
         let n = inventory.count(cell.0);
@@ -310,7 +309,9 @@ pub fn update_hotbar(
                 .map(|(g, n)| format!("{n} {}", g.name()))
                 .collect();
             let cost = cost.join(" + ");
-            if inventory.can_craft(item) {
+            // Green when the *whole chain* is within reach, not just the top row: X opens
+            // the recipe screen, and one press there makes the nails as well as the car.
+            if inventory.plan(item).short.is_empty() {
                 (
                     format!("{} = {cost}   press X to make one", title(item)),
                     Color::srgb(0.55, 1.0, 0.55),
@@ -352,7 +353,7 @@ fn using_it(item: Item, owned: u32) -> Option<&'static str> {
         Class::Vehicle { .. } => Some("L2 puts it down and picks it up, B drives"),
         // Selecting it *is* opening it, which is the part nobody would guess.
         Class::Equippable { .. } => Some("pick it before you land, then steer"),
-        Class::Block(_) | Class::Tool { .. } | Class::Component { .. } => None,
+        Class::Block(_) | Class::Tool { .. } | Class::Part { .. } => None,
     }
 }
 

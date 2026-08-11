@@ -55,7 +55,7 @@ joining player ignores their own seed and gets the host's world.
 | swing / fire   | hold left click  | hold `R2`            |
 | place block    | right click      | `L2`                 |
 | hotbar         | `1`–`9`, `Q`/`E` | d-pad                |
-| craft          | `C`              | `X`                  |
+| recipe screen  | `C`              | `X`                  |
 | get in / out   | `R`              | `B`                  |
 | pause menu     | `Esc`            | `Start`              |
 | menus          | arrows, `Enter`  | d-pad / stick, `A`   |
@@ -84,10 +84,32 @@ zooms — so the game has one code path through all of them, and a new tool is a
 
 You start empty-handed. Breaking a block puts it in your pocket; placing one spends it.
 
-The hotbar along the bottom is everything there is to hold, and it is also the crafting
-menu — there is no second screen and no grid to arrange. Walk the cursor onto a thing and
-the line above tells you what it is made of; press craft and, if you have the parts, you
-have one.
+Press craft and the recipe screen comes up. **There is not a word on it** — the players
+cannot read, so it is shapes, colour and movement all the way through.
+
+![picking a thing by its code and building it in one press](docs/design/crafting-codelock.gif)
+
+**Two presses reach anything in the game.** The first says what *kind* of thing — a cube, a
+nail, a hammer, a parachute, a car — and the second picks one of those, drawn as its own
+picture in its own colour. The keys never move, so it is a code you can learn as a motor
+pattern and punch in without looking: right, right, A, right, A is a drill, every time. The
+bar under each thing says whether you can make one right now: green yes, red not yet, grey
+you dig this up.
+
+**Then its recipe appears as a graph.** What you gather is on the bottom row, what you make
+out of it is above, and belts run upward with the count on them as dots — six dots of wood,
+eight of nails. Every item is drawn once however many things it goes into, so stone feeding
+both the nails *and* the car is one stone with two belts leaving it.
+
+**One press builds the whole chain.** Ask for a car with ten stone and six wood in your
+pocket and you get the eight nails as well, without ever being told to make nails. There is
+no wait: the pile changes the instant the button goes down, and what plays out afterwards —
+dots running up the belts, each thing swelling as it is made — is the receipt. Walk away
+halfway through and the car is still yours. If something is missing, nothing is spent and
+the thing you have to go and dig up shakes at you, with a hollow dot for each one short.
+
+The hotbar along the bottom is still everything there is to hold, and the line above it
+still says what each thing is made of.
 
 |             | made of                    |
 |-------------|----------------------------|
@@ -172,8 +194,10 @@ puts him at the wheel, which is how the seat above got checked.
 | file                | what it owns                                                    |
 |---------------------|-----------------------------------------------------------------|
 | `src/registry.rs`   | **every block and item in the game** — start here to add content |
-| `src/inventory.rs`  | what a player has, and what crafting spends                      |
-| `src/hud.rs`        | crosshair, status line, and the hotbar you craft from            |
+| `src/inventory.rs`  | what a player has, and what a whole chain of crafting spends     |
+| `src/recipes.rs`    | **the recipe screen** — the code, the graph, and the one press   |
+| `src/glyph.rs`      | **what each item looks like**, as rectangles — no words anywhere |
+| `src/hud.rs`        | crosshair, status line, and the hotbar                           |
 | `src/world.rs`      | chunk storage and seed-deterministic terrain                     |
 | `src/mesh.rs`       | turning voxels into geometry                                     |
 | `src/player.rs`     | movement, collision, and what a landing costs                    |
@@ -181,6 +205,7 @@ puts him at the wheel, which is how the seat above got checked.
 | `src/raycast.rs`    | what you're looking at                                           |
 | `src/avatar.rs`     | **the models** — the spaceman and the car, tables of boxes       |
 | `src/portrait.rs`   | `blockgame portrait` — renders those models to `docs/`           |
+| `src/reel.rs`       | `blockgame reel` — plays the recipe screen and writes the frames |
 | `src/input.rs`      | keyboard/mouse/gamepad → one `Intent`                            |
 | `src/net/`          | the iroh message bus and wire format                             |
 | `src/game.rs`       | the Bevy app that wires the above together                       |

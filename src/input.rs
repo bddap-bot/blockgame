@@ -168,12 +168,15 @@ pub struct Intent {
 pub struct MenuIntent {
     /// Rows to move the cursor, this frame.
     pub step: i32,
+    /// Cells to move it sideways. A list is a column and never asks; a pad of keys is a
+    /// grid, and both are driven by the same d-pad.
+    pub across: i32,
     pub confirm: bool,
     /// Back out: leave the pause menu, or leave the game from the title.
     pub back: bool,
-    /// Whether the stick was already pushed last frame. A held stick steps once, not
-    /// once per frame — a list that scrolls at 60 rows a second is unusable.
-    stick_pushed: bool,
+    /// Whether the stick was already pushed last frame, on each axis. A held stick steps
+    /// once, not once per frame — a list that scrolls at 60 rows a second is unusable.
+    stick_pushed: BVec2,
 }
 
 fn deadzoned(v: Vec2) -> Vec2 {
@@ -272,25 +275,34 @@ pub fn gather_menu_intent(
         |up: KeyCode, down: KeyCode| keys.just_pressed(down) as i32 - keys.just_pressed(up) as i32;
     let mut out = MenuIntent {
         step: key_step(KeyCode::ArrowUp, KeyCode::ArrowDown) + key_step(KEYS.forward, KEYS.back),
+        across: key_step(KeyCode::ArrowLeft, KeyCode::ArrowRight) + key_step(KEYS.left, KEYS.right),
         confirm: keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::Space),
         back: keys.just_pressed(KEYS.pause),
-        stick_pushed: false,
+        stick_pushed: BVec2::FALSE,
     };
 
     // Folded across the pads, exactly as gameplay input is — a menu that moved two rows
     // per press on the TV would be the same bug wearing a different hat.
     out.step += tapped(&pads, PAD.next_row) as i32 - tapped(&pads, PAD.prev_row) as i32;
+    out.across += tapped(&pads, PAD.next_item) as i32 - tapped(&pads, PAD.prev_item) as i32;
     out.confirm |= tapped(&pads, PAD.jump);
     // B backs out, and so does Start — whichever button opened this, the same one and the
     // obvious one both close it.
     out.back |= tapped(&pads, PAD.ride) || tapped(&pads, PAD.pause);
     // The stick reads as a d-pad: pushed past the deadzone is one step, and it has to come
-    // back to centre before it gives another.
-    let pushed = stick(&pads, Gamepad::left_stick).y;
-    if pushed != 0.0 {
-        out.stick_pushed = true;
-        if !menu.stick_pushed {
-            out.step += if pushed < 0.0 { 1 } else { -1 };
+    // back to centre before it gives another. Each axis latches on its own, so a shove on
+    // the diagonal is one step each way rather than one of them sticking.
+    let pushed = stick(&pads, Gamepad::left_stick);
+    if pushed.y != 0.0 {
+        out.stick_pushed.y = true;
+        if !menu.stick_pushed.y {
+            out.step += if pushed.y < 0.0 { 1 } else { -1 };
+        }
+    }
+    if pushed.x != 0.0 {
+        out.stick_pushed.x = true;
+        if !menu.stick_pushed.x {
+            out.across += if pushed.x < 0.0 { -1 } else { 1 };
         }
     }
 

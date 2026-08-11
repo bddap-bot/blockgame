@@ -19,13 +19,15 @@ const HINT_FONT: f32 = 22.0;
 /// Padding around a row, which is also the target a cursor has to land on.
 const ROW_PAD: f32 = 10.0;
 
-const SELECTED: Color = Color::srgb(1.0, 0.85, 0.35);
+/// Where the cursor is. Every screen in the game that has a cursor uses this one gold —
+/// see [`crate::recipes`], which is not a list but is walked by the same thumb.
+pub const SELECTED: Color = Color::srgb(1.0, 0.85, 0.35);
 const UNSELECTED: Color = Color::srgb(0.86, 0.88, 0.92);
 const HINT: Color = Color::srgb(0.62, 0.66, 0.72);
 /// The panel behind the list. Nearly opaque: a paused world is a sunlit voxel forest,
 /// and at anything less the trees read straight through a row of text. What is left of
 /// the world through it is enough to see the game is still there.
-const PANEL: Color = Color::srgba(0.05, 0.06, 0.09, 0.96);
+pub const PANEL: Color = Color::srgba(0.05, 0.06, 0.09, 0.96);
 const SELECTED_ROW: Color = Color::srgba(1.0, 0.85, 0.35, 0.16);
 
 /// What a panel shows. Compared against what is already drawn, so the UI is rebuilt when

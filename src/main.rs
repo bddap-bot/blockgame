@@ -7,6 +7,7 @@
 
 mod avatar;
 mod game;
+mod glyph;
 mod hud;
 mod input;
 mod inventory;
@@ -17,6 +18,8 @@ mod pause;
 mod player;
 mod portrait;
 mod raycast;
+mod recipes;
+mod reel;
 mod registry;
 mod ticket;
 mod title;
@@ -62,6 +65,13 @@ enum Command {
         #[arg(long)]
         car: bool,
     },
+    /// Play the crafting screen to itself and write every frame out as a PNG. What
+    /// `docs/design/` is made of — a screen about movement cannot be reviewed as a
+    /// screenshot.
+    Reel {
+        #[arg(long, default_value = "frames")]
+        out: std::path::PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -84,6 +94,7 @@ fn main() -> Result<()> {
             };
             return portrait::run(out, holding, subject);
         }
+        Some(Command::Reel { out }) => return reel::run(out),
         Some(Command::Join { ticket }) => Some(ticket),
         None => None,
     };

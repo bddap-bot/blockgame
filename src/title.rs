@@ -45,6 +45,8 @@ pub enum Playing {
     #[default]
     Live,
     Paused,
+    /// The crafting screen is up: a code, a recipe graph, and the button that builds it.
+    Crafting,
 }
 
 /// What the player asked for before there was a world.
