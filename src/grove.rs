@@ -704,6 +704,145 @@ pub fn fly(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::Item;
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// Everything [`open`] needs that the game or the film would have brought with it.
+    fn staged() -> bevy::ecs::world::World {
+        let mut ecs = bevy::ecs::world::World::new();
+        let mut meshes = Assets::<Mesh>::default();
+        let mut materials = Assets::<StandardMaterial>::default();
+        ecs.insert_resource(Palette::new(&mut meshes, &mut materials));
+        ecs.insert_resource(meshes);
+        ecs.insert_resource(materials);
+        ecs.init_resource::<Time>();
+        ecs.init_resource::<OnHand>();
+        ecs.init_resource::<Held>();
+        ecs.init_resource::<crate::input::Intent>();
+        ecs.run_system_once(open).unwrap();
+        ecs
+    }
+
+    fn press(ecs: &mut bevy::ecs::world::World, nav: Nav) {
+        ecs.insert_resource(nav);
+        ecs.run_system_once(navigate).unwrap();
+    }
+
+    /// The screen's whole contract with whoever is driving it: the d-pad moves the cursor,
+    /// the cursor *is* the hotbar selection, and craft is a request rather than a payment.
+    #[test]
+    fn the_cursor_moves_the_hotbar_and_crafting_is_only_ever_asked_for() {
+        let mut ecs = staged();
+        let start = ecs.resource::<Cursor>().at;
+        assert_eq!(
+            ecs.resource::<Held>().0,
+            Graph::of_registry().nodes()[start].item,
+            "opening the screen points the hotbar at what the cursor is on"
+        );
+
+        press(
+            &mut ecs,
+            Nav {
+                step: IVec2::X,
+                ..default()
+            },
+        );
+        assert_ne!(ecs.resource::<Cursor>().at, start, "right did not move");
+        let now = ecs.resource::<Cursor>().at;
+        assert_eq!(
+            ecs.resource::<Held>().0,
+            Graph::of_registry().nodes()[now].item,
+            "the hotbar did not follow the cursor"
+        );
+
+        // Nothing on hand, so the ask is refused and — the point — nothing is spent here
+        // either way. The pile is the host's, and this screen never writes to it.
+        let before = ecs.resource::<OnHand>().0.clone();
+        press(
+            &mut ecs,
+            Nav {
+                craft: true,
+                ..default()
+            },
+        );
+        assert!(
+            !ecs.resource::<crate::input::Intent>().craft,
+            "asked for a recipe it cannot pay for"
+        );
+        assert_eq!(ecs.resource::<OnHand>().0, before);
+
+        // Sideways along the ground to the stone, then up its one line to the nail. Bounded,
+        // so a layout that stopped putting the two within a lap of each other says so here
+        // rather than spinning.
+        ecs.resource_mut::<OnHand>().0.add(Item::Stone, 4);
+        for _ in 0..Item::ALL.len() {
+            if ecs.resource::<Held>().0 == Item::Stone {
+                break;
+            }
+            press(
+                &mut ecs,
+                Nav {
+                    step: IVec2::X,
+                    ..default()
+                },
+            );
+        }
+        assert_eq!(
+            ecs.resource::<Held>().0,
+            Item::Stone,
+            "sideways never found the stone"
+        );
+        press(
+            &mut ecs,
+            Nav {
+                step: IVec2::Y,
+                ..default()
+            },
+        );
+        assert_eq!(
+            ecs.resource::<Held>().0,
+            Item::Nail,
+            "up from the stone is the one thing stone makes"
+        );
+        press(
+            &mut ecs,
+            Nav {
+                craft: true,
+                ..default()
+            },
+        );
+        assert!(
+            ecs.resource::<crate::input::Intent>().craft,
+            "an affordable recipe was not asked for"
+        );
+        assert_eq!(
+            ecs.resource::<OnHand>().0.count(Item::Stone),
+            4,
+            "the screen spent the stone itself instead of asking the host to"
+        );
+    }
+
+    /// Closing puts back every entity it drew. A screen you can open twice must not leave
+    /// the first grove hanging in space behind the second.
+    #[test]
+    fn closing_takes_the_whole_grove_down_again() {
+        let mut ecs = staged();
+        let drawn = |ecs: &mut bevy::ecs::world::World| {
+            (
+                ecs.query::<&GroveNode>().iter(ecs).count(),
+                ecs.query::<&Bead>().iter(ecs).count(),
+                ecs.query::<&GroveCam>().iter(ecs).count(),
+            )
+        };
+        let (nodes, beads, cameras) = drawn(&mut ecs);
+        assert_eq!(nodes, Item::ALL.len(), "one thing on screen per item");
+        assert!(beads > 0 && cameras == 1, "nothing was drawn to fly around");
+
+        ecs.run_system_once(close).unwrap();
+        assert_eq!(drawn(&mut ecs), (0, 0, 0), "the grove outlived its screen");
+        assert!(ecs.get_resource::<Grove>().is_none());
+        assert!(ecs.get_resource::<Cursor>().is_none());
+    }
 
     /// Rows never overlap in space, whatever the layout does sideways: a thing always
     /// stands clear of what it is made of, which is the one thing height is saying.

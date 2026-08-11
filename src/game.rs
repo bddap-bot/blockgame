@@ -340,7 +340,7 @@ pub fn run(start: Start) -> anyhow::Result<()> {
             // The craft button opens the grove; the grove is where crafting happens now,
             // and `craft_on_request` below answers it and nothing else.
             open_grove.run_if(in_state(Playing::Live)),
-            (mirror_pile, grove::navigate)
+            (mirror_pile, grove::navigate, close_grove)
                 .chain()
                 .run_if(in_state(Playing::Crafting)),
             mind_the_body,
@@ -433,6 +433,15 @@ fn open_grove(mut intent: ResMut<Intent>, mut playing: ResMut<NextState<Playing>
     if intent.craft {
         intent.craft = false;
         playing.set(Playing::Crafting);
+    }
+}
+
+/// And the way back out. Here rather than in [`crate::grove`] because which state the game
+/// is in is the game's business — the screen only reports that somebody asked to leave, and
+/// under `blockgame grove` there is no state for it to leave to.
+fn close_grove(nav: Res<grove::Nav>, mut playing: ResMut<NextState<Playing>>) {
+    if nav.close {
+        playing.set(Playing::Live);
     }
 }
 
