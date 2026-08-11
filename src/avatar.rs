@@ -148,6 +148,173 @@ pub const CAR: &[Part] = &[
     part(Skin::Dark, [0.20, 0.14, 0.08], [0.46, 0.42, 1.17]),
 ];
 
+/// **What each item looks like when it is being shown rather than held** — the silhouettes
+/// [`crate::crafttree`] hangs on the recipe graph.
+///
+/// A child who cannot read tells a hammer from a rifle by its *shape*, so the graph cannot
+/// be fourteen coloured cubes. Each row below is the same table of boxes every other model
+/// in this file is, drawn face-on: long in `x`, tall in `y`, thin in `z`.
+///
+/// A block is a cube on purpose. That is what it is in the world, and a picture of grass
+/// that is not the grass you dug is a second thing to learn.
+fn icon(item: Item) -> &'static [Part] {
+    /// A block, drawn as the block it is.
+    const fn cube(item: Item) -> [Part; 1] {
+        [part(Skin::Paint(item), [1.0, 1.0, 1.0], [0.0; 3])]
+    }
+    const GRASS: &[Part] = &cube(Item::Grass);
+    const DIRT: &[Part] = &cube(Item::Dirt);
+    const STONE: &[Part] = &cube(Item::Stone);
+    const SAND: &[Part] = &cube(Item::Sand);
+    const WOOD: &[Part] = &cube(Item::Wood);
+    const LEAVES: &[Part] = &cube(Item::Leaves);
+    const CUSHION: &[Part] = &cube(Item::Cushion);
+
+    match item {
+        Item::Grass => GRASS,
+        Item::Dirt => DIRT,
+        Item::Stone => STONE,
+        Item::Sand => SAND,
+        Item::Wood => WOOD,
+        Item::Leaves => LEAVES,
+        Item::Cushion => CUSHION,
+        Item::Nail => NAIL,
+        Item::Hammer => HAMMER,
+        Item::Drill => DRILL,
+        Item::Handgun => HANDGUN,
+        Item::Rifle => RIFLE,
+        Item::Parachute => PARACHUTE,
+        // The car you drive, shrunk — one table of boxes, so the thing in the graph and
+        // the thing in the field can never be two different cars.
+        Item::Car => CAR,
+    }
+}
+
+const NAIL: &[Part] = &[
+    part(Skin::Paint(Item::Nail), [0.10, 0.78, 0.10], [0.0, 0.0, 0.0]),
+    part(
+        Skin::Paint(Item::Nail),
+        [0.38, 0.10, 0.38],
+        [0.0, 0.44, 0.0],
+    ),
+    part(Skin::Gear, [0.05, 0.18, 0.05], [0.0, -0.48, 0.0]),
+];
+
+const HAMMER: &[Part] = &[
+    part(
+        Skin::Paint(Item::Hammer),
+        [0.13, 0.92, 0.13],
+        [0.0, -0.06, 0.0],
+    ),
+    part(Skin::Gear, [0.56, 0.24, 0.24], [0.06, 0.48, 0.0]),
+    // The claw: the one line that stops a hammer reading as a lollipop.
+    part(Skin::Gear, [0.16, 0.22, 0.22], [-0.30, 0.34, 0.0]),
+];
+
+const DRILL: &[Part] = &[
+    part(
+        Skin::Paint(Item::Drill),
+        [0.44, 0.46, 0.34],
+        [0.02, 0.12, 0.0],
+    ),
+    part(Skin::Dark, [0.19, 0.42, 0.21], [-0.08, -0.28, 0.0]),
+    part(Skin::Gear, [0.52, 0.10, 0.10], [0.50, 0.18, 0.0]),
+];
+
+const HANDGUN: &[Part] = &[
+    part(
+        Skin::Paint(Item::Handgun),
+        [0.72, 0.16, 0.14],
+        [0.08, 0.14, 0.0],
+    ),
+    part(Skin::Gear, [0.56, 0.10, 0.15], [0.16, 0.26, 0.0]),
+    part(
+        Skin::Paint(Item::Handgun),
+        [0.18, 0.40, 0.16],
+        [-0.20, -0.14, 0.0],
+    ),
+];
+
+const RIFLE: &[Part] = &[
+    part(Skin::Gear, [1.22, 0.11, 0.11], [0.16, 0.08, 0.0]),
+    part(
+        Skin::Paint(Item::Rifle),
+        [0.52, 0.19, 0.15],
+        [-0.06, 0.00, 0.0],
+    ),
+    part(
+        Skin::Paint(Item::Rifle),
+        [0.36, 0.28, 0.14],
+        [-0.44, -0.08, 0.0],
+    ),
+    // The scope, which is what tells it from the handgun at a glance.
+    part(Skin::Dark, [0.32, 0.12, 0.12], [0.02, 0.26, 0.0]),
+];
+
+const PARACHUTE: &[Part] = &[
+    part(
+        Skin::Paint(Item::Parachute),
+        [0.34, 0.24, 0.30],
+        [0.0, 0.40, 0.0],
+    ),
+    part(
+        Skin::Paint(Item::Parachute),
+        [0.28, 0.19, 0.26],
+        [-0.28, 0.31, 0.0],
+    ),
+    part(
+        Skin::Paint(Item::Parachute),
+        [0.28, 0.19, 0.26],
+        [0.28, 0.31, 0.0],
+    ),
+    part(
+        Skin::Paint(Item::Parachute),
+        [0.24, 0.15, 0.22],
+        [0.50, 0.16, 0.0],
+    ),
+    part(
+        Skin::Paint(Item::Parachute),
+        [0.24, 0.15, 0.22],
+        [-0.50, 0.16, 0.0],
+    ),
+    part(Skin::Dark, [0.04, 0.46, 0.04], [-0.25, -0.06, 0.0]),
+    part(Skin::Dark, [0.04, 0.46, 0.04], [0.25, -0.06, 0.0]),
+    part(Skin::Gear, [0.32, 0.16, 0.20], [0.0, -0.34, 0.0]),
+];
+
+/// Spawns `item`'s silhouette, scaled and centred to fill a one-block cube whatever the
+/// table's own scale was, and returns its root.
+///
+/// The fit is measured off the table rather than written next to it: a model is a shape,
+/// and asking whoever adds one to also work out its bounding box is asking for a car that
+/// is a speck or a nail that fills the screen.
+pub fn spawn_icon(commands: &mut Commands, palette: &Palette, item: Item) -> Entity {
+    let parts = icon(item);
+    let (centre, size) = bounds(parts);
+    let fit = 1.0 / size.max_element();
+    commands
+        .spawn((Transform::default(), Visibility::Visible))
+        .with_children(|root| {
+            root.spawn((
+                Transform::from_translation(-centre * fit).with_scale(Vec3::splat(fit)),
+                Visibility::Visible,
+            ))
+            .with_children(|fitted| build(fitted, palette, parts));
+        })
+        .id()
+}
+
+/// The centre and the extent of everything a table draws.
+fn bounds(parts: &[Part]) -> (Vec3, Vec3) {
+    let (mut low, mut high) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    for p in parts {
+        let (at, half) = (Vec3::from(p.at), Vec3::from(p.size) / 2.0);
+        low = low.min(at - half);
+        high = high.max(at + half);
+    }
+    ((low + high) / 2.0, high - low)
+}
+
 /// The cube in a player's right mitten: where it sits, and how big it is.
 ///
 /// One cube whatever is being carried, coloured from the item table. A rifle that is
@@ -210,7 +377,7 @@ impl Palette {
     }
 
     /// The colour the registry gives an item — what it is drawn in wherever it appears.
-    fn item(&self, item: Item) -> Handle<StandardMaterial> {
+    pub fn item(&self, item: Item) -> Handle<StandardMaterial> {
         self.items[item.index()].clone()
     }
 }
@@ -419,5 +586,61 @@ mod tests {
             layers.len() >= 3,
             "frame, plate and rocket must sit at three different depths"
         );
+    }
+
+    /// The whole point of the icons: a child picks a thing out of the graph by its outline,
+    /// so no two of them may *have* the same outline. Blocks are exempt from each other —
+    /// they are all cubes in the world and telling them apart is the colour's job.
+    #[test]
+    fn every_made_thing_has_its_own_silhouette() {
+        let shape = |item: Item| {
+            let mut boxes: Vec<[i32; 6]> = icon(item)
+                .iter()
+                .map(|p| {
+                    let (at, size) = (p.at, p.size);
+                    // Rounded, because two tables that differ in the fourth decimal are the
+                    // same picture to the eye this test is standing in for.
+                    [
+                        (at[0] * 50.0) as i32,
+                        (at[1] * 50.0) as i32,
+                        (at[2] * 50.0) as i32,
+                        (size[0] * 50.0) as i32,
+                        (size[1] * 50.0) as i32,
+                        (size[2] * 50.0) as i32,
+                    ]
+                })
+                .collect();
+            boxes.sort();
+            boxes
+        };
+        let made: Vec<Item> = Item::ALL
+            .iter()
+            .copied()
+            .filter(|i| !matches!(i.class(), crate::registry::Class::Block(_)))
+            .collect();
+        for (a, b) in made
+            .iter()
+            .enumerate()
+            .flat_map(|(i, a)| made[i + 1..].iter().map(move |b| (a, b)))
+        {
+            assert_ne!(shape(*a), shape(*b), "{a:?} and {b:?} are the same picture");
+        }
+    }
+
+    /// Every icon fits the same cube, so a nail and a car are the same size on the row.
+    #[test]
+    fn icons_are_all_cut_to_one_size() {
+        for item in Item::ALL {
+            let (_, size) = bounds(icon(*item));
+            assert!(
+                size.min_element() > 0.0,
+                "{item:?}'s icon is flat in some direction and vanishes edge-on"
+            );
+            let fit = 1.0 / size.max_element();
+            assert!(
+                ((size * fit).max_element() - 1.0).abs() < 1e-4,
+                "{item:?} does not fill its cell"
+            );
+        }
     }
 }

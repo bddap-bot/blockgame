@@ -13,6 +13,7 @@ use bevy::window::{CursorGrabMode, CursorOptions, MonitorSelection, PrimaryWindo
 use std::collections::{HashMap, HashSet};
 
 use crate::avatar;
+use crate::grove::{self, OnHand};
 use crate::hud;
 use crate::input::{Intent, MenuIntent, PITCH_LIMIT, gather_intent, gather_menu_intent};
 use crate::inventory::{Held, Inventories, Inventory};
@@ -219,6 +220,11 @@ struct ChunkTag;
 #[derive(Component)]
 struct Highlight;
 
+/// The eye in the player's head. [`crate::grove`] flies a camera of its own, so every
+/// query that means the world's camera says which one it means.
+#[derive(Component)]
+struct WorldCam;
+
 /// Builds and runs the game. Returns when the window closes.
 ///
 /// The app starts on the title screen with no world and no network: which world this is
@@ -265,7 +271,14 @@ pub fn run(start: Start) -> anyhow::Result<()> {
     // frame late, so the Escape that opened the pause menu was still "just pressed" on
     // the frame the menu came up and closed it again within it. The menu was
     // unreachable and nothing was on fire.
-    .add_systems(PreUpdate, gather_menu_intent.after(InputSystems))
+    .add_systems(
+        PreUpdate,
+        (
+            gather_menu_intent,
+            grove::read_pad.run_if(in_state(Playing::Crafting)),
+        )
+            .after(InputSystems),
+    )
     // Every screen the game draws is sized for the Deck's 800 rows, the title included, so
     // this runs whatever phase we are in and not just once: a TV that changes mode under
     // us is a resize like any other.
@@ -287,8 +300,30 @@ pub fn run(start: Start) -> anyhow::Result<()> {
         OnEnter(Phase::World),
         (enter_world, setup, hud::setup).chain(),
     )
+    .init_resource::<OnHand>()
+    .init_resource::<grove::Nav>()
     .add_systems(OnEnter(Playing::Paused), pause::open)
     .add_systems(OnExit(Playing::Paused), pause::close)
+    .add_systems(
+        OnEnter(Playing::Crafting),
+        (enter_grove, grove::open).chain(),
+    )
+    .add_systems(
+        OnExit(Playing::Crafting),
+        (grove::close, leave_grove).chain(),
+    )
+    .add_systems(
+        Update,
+        (
+            grove::nodes,
+            grove::beads,
+            grove::lines,
+            grove::tallies,
+            grove::marks,
+            grove::fly,
+        )
+            .run_if(in_state(Playing::Crafting)),
+    )
     .add_systems(
         Update,
         (pause::drive, pause::redraw)
@@ -302,6 +337,12 @@ pub fn run(start: Start) -> anyhow::Result<()> {
             // running behind it — a host that froze everybody else's game by reading a
             // menu would be a worse thing than an unpaused world.
             gather_intent.run_if(in_state(Playing::Live)),
+            // The craft button opens the grove; the grove is where crafting happens now,
+            // and `craft_on_request` below answers it and nothing else.
+            open_grove.run_if(in_state(Playing::Live)),
+            (mirror_pile, grove::navigate)
+                .chain()
+                .run_if(in_state(Playing::Crafting)),
             mind_the_body,
             park_or_ride,
             apply_intent,
@@ -383,6 +424,64 @@ fn open_pause_menu(intent: Res<Intent>, mut playing: ResMut<NextState<Playing>>)
     }
 }
 
+/// The craft button, in the world: it opens [`crate::grove`] rather than making whatever
+/// the hotbar happened to be pointing at.
+///
+/// The flag is put back down on the way through, because `craft_on_request` is further
+/// down this same chain and would otherwise make the thing *and* open the screen.
+fn open_grove(mut intent: ResMut<Intent>, mut playing: ResMut<NextState<Playing>>) {
+    if intent.craft {
+        intent.craft = false;
+        playing.set(Playing::Crafting);
+    }
+}
+
+/// Hands the grove the host's word about what this player has. The screen draws a pile and
+/// does not care whose; this is the game saying which.
+fn mirror_pile(
+    inventories: Res<Inventories>,
+    session: NonSend<Session>,
+    mut on_hand: ResMut<OnHand>,
+) {
+    let mine = inventories.of(session.me());
+    if &on_hand.0 != mine {
+        on_hand.0 = mine.clone();
+    }
+}
+
+/// The world stops being driven while the grove is up: a walk already in progress has to be
+/// *let go of* rather than merely stop being read, or the player strolls off a cliff while
+/// looking at a recipe. The same reason [`pause::open`] does it.
+fn enter_grove(
+    mut intent: ResMut<Intent>,
+    mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>,
+    mut world_cam: Query<&mut Camera, With<WorldCam>>,
+    mut hud: Query<&mut Visibility, With<hud::Overlay>>,
+) {
+    *intent = Intent::default();
+    grab_mouse(&mut cursor, false);
+    for mut cam in &mut world_cam {
+        cam.is_active = false;
+    }
+    for mut shown in &mut hud {
+        *shown = Visibility::Hidden;
+    }
+}
+
+fn leave_grove(
+    mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>,
+    mut world_cam: Query<&mut Camera, With<WorldCam>>,
+    mut hud: Query<&mut Visibility, With<hud::Overlay>>,
+) {
+    grab_mouse(&mut cursor, true);
+    for mut cam in &mut world_cam {
+        cam.is_active = true;
+    }
+    for mut shown in &mut hud {
+        *shown = Visibility::Inherited;
+    }
+}
+
 fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -401,6 +500,9 @@ fn setup(
     commands.insert_resource(avatar::Palette::new(&mut meshes, &mut materials));
 
     commands.spawn((
+        // Tagged, because the crafting screen brings a camera of its own and every query
+        // below means *this* one — the eye in the player's head.
+        WorldCam,
         Camera3d::default(),
         Projection::Perspective(PerspectiveProjection {
             fov: FOV,
@@ -453,7 +555,7 @@ fn apply_intent(
     session: NonSend<Session>,
     mut me: ResMut<Me>,
     mut held: ResMut<Held>,
-    mut camera: Query<&mut Transform, With<Camera3d>>,
+    mut camera: Query<&mut Transform, With<WorldCam>>,
 ) {
     // A long frame (window drag, a chunk-mesh hitch) must not turn into a teleport
     // through the floor.
@@ -522,7 +624,7 @@ fn pick_item(intent: &Intent, held: &mut Held) {
 
 /// Puts the camera in the player's head. The one place it is moved, so a driver's view and
 /// a walker's are the same view of the same eye — a car needs no camera of its own.
-fn aim_camera(p: &Player, camera: &mut Query<&mut Transform, With<Camera3d>>) {
+fn aim_camera(p: &Player, camera: &mut Query<&mut Transform, With<WorldCam>>) {
     if let Ok(mut t) = camera.single_mut() {
         t.translation = p.eye();
         t.rotation = Quat::from_euler(EulerRot::YXZ, p.yaw, p.pitch, 0.0);
@@ -942,7 +1044,7 @@ fn aim_zoom(
     held: Res<Held>,
     inventories: Res<Inventories>,
     session: NonSend<Session>,
-    mut camera: Query<&mut Projection, With<Camera3d>>,
+    mut camera: Query<&mut Projection, With<WorldCam>>,
 ) {
     let zoom = if intent.use_item {
         inventories.of(session.me()).using(held.0).zoom

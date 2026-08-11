@@ -6,10 +6,10 @@
 //! living room and the last thing anybody reads, and the pause menu shares the ticket
 //! on request anyway.
 //!
-//! The hotbar is also the crafting menu. There is no second screen to open, no grid to
-//! arrange and no order to get right — you walk the cursor onto a thing and press craft,
-//! and the line above the hotbar tells you what it costs and whether you can afford it.
-//! That is the whole mechanism, and it is the one a six-year-old can be shown once.
+//! The hotbar is what you are holding, and the line above it says what the cursor is on
+//! and what it costs. Making things is no longer here: the craft button opens
+//! [`crate::grove`], which is the same cursor over the same recipes, drawn for somebody who
+//! cannot read this line.
 //!
 //! Every cell comes from [`Item::ALL`], so an item added to the registry appears here with
 //! no change to this file.
@@ -34,6 +34,11 @@ const RING: f32 = 3.0;
 /// its pixels, and [`scale_to_screen`] scales them to the panel actually in front of the
 /// player.
 const DESIGN_ROWS: f32 = 800.0;
+
+/// Everything this file draws over the world, so the crafting screen can take the whole
+/// screen by hiding one thing rather than three.
+#[derive(Component)]
+pub struct Overlay;
 
 /// What the cursor is on and what it costs, directly above the hotbar.
 #[derive(Component)]
@@ -76,13 +81,16 @@ pub struct HotbarLabel(Item);
 pub fn setup(mut commands: Commands) {
     // Crosshair. Sized for the Deck's 1280x800 panel, where a 1px reticle disappears.
     commands
-        .spawn(Node {
-            width: Val::Percent(100.0),
-            height: Val::Percent(100.0),
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            ..default()
-        })
+        .spawn((
+            Overlay,
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+        ))
         .with_children(|ui| {
             ui.spawn((
                 Text::new("+"),
@@ -96,6 +104,7 @@ pub fn setup(mut commands: Commands) {
 
     // Top centre, where the eye already is — and empty the rest of the time.
     commands.spawn((
+        Overlay,
         NoticeText,
         Text::new(""),
         TextFont {
@@ -119,15 +128,18 @@ pub fn setup(mut commands: Commands) {
     ));
 
     commands
-        .spawn(Node {
-            position_type: PositionType::Absolute,
-            bottom: Val::Px(16.0),
-            width: Val::Percent(100.0),
-            flex_direction: FlexDirection::Column,
-            align_items: AlignItems::Center,
-            row_gap: Val::Px(6.0),
-            ..default()
-        })
+        .spawn((
+            Overlay,
+            Node {
+                position_type: PositionType::Absolute,
+                bottom: Val::Px(16.0),
+                width: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                row_gap: Val::Px(6.0),
+                ..default()
+            },
+        ))
         .with_children(|hud| {
             // On its own dark plate: this line is read against whatever the player
             // happens to be looking at, and a sunlit sand cliff swallows white text.

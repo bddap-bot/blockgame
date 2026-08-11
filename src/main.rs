@@ -6,7 +6,10 @@
 //! all a friend somewhere else needs — and the same code runs either way.
 
 mod avatar;
+mod craftgraph;
 mod game;
+mod grove;
+mod grovefilm;
 mod hud;
 mod input;
 mod inventory;
@@ -62,6 +65,12 @@ enum Command {
         #[arg(long)]
         car: bool,
     },
+    /// Play the crafting screen to itself and save every frame as a PNG, for the animation
+    /// in `docs/design/`. Needs a display; on a headless box, Xvfb and lavapipe.
+    Grove {
+        #[arg(long, default_value = "docs/design/grove")]
+        out: std::path::PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -84,6 +93,7 @@ fn main() -> Result<()> {
             };
             return portrait::run(out, holding, subject);
         }
+        Some(Command::Grove { out }) => return grovefilm::run(out),
         Some(Command::Join { ticket }) => Some(ticket),
         None => None,
     };

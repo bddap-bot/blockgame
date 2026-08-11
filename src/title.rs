@@ -45,6 +45,8 @@ pub enum Playing {
     #[default]
     Live,
     Paused,
+    /// The crafting screen ([`crate::grove`]) is up over the world.
+    Crafting,
 }
 
 /// What the player asked for before there was a world.
