@@ -308,9 +308,8 @@ pub fn gather_forge_nav(
     pads: Query<&Gamepad>,
     mut nav: ResMut<crate::forge::Nav>,
 ) {
-    let key_step = |neg: KeyCode, pos: KeyCode| {
-        keys.just_pressed(pos) as i32 - keys.just_pressed(neg) as i32
-    };
+    let key_step =
+        |neg: KeyCode, pos: KeyCode| keys.just_pressed(pos) as i32 - keys.just_pressed(neg) as i32;
     let mut out = crate::forge::Nav {
         across: key_step(KeyCode::ArrowLeft, KeyCode::ArrowRight) + key_step(KEYS.left, KEYS.right),
         down: key_step(KeyCode::ArrowUp, KeyCode::ArrowDown) + key_step(KEYS.forward, KEYS.back),
@@ -320,7 +319,8 @@ pub fn gather_forge_nav(
     };
 
     for pad in &pads {
-        out.across += pad.just_pressed(PAD.next_item) as i32 - pad.just_pressed(PAD.prev_item) as i32;
+        out.across +=
+            pad.just_pressed(PAD.next_item) as i32 - pad.just_pressed(PAD.prev_item) as i32;
         out.down += pad.just_pressed(PAD.next_row) as i32 - pad.just_pressed(PAD.prev_row) as i32;
         out.focus |= pad.just_pressed(PAD.jump);
         out.craft |= pad.just_pressed(PAD.craft);

@@ -316,7 +316,12 @@ pub fn run(start: Start) -> anyhow::Result<()> {
             submit_forge_crafts,
             forge::rebuild,
             forge::react,
-            forge::animate,
+            forge::beads,
+            forge::notches,
+            forge::nodes,
+            forge::cursor,
+            forge::flight,
+            forge::eye,
             close_forge,
         )
             .chain()
@@ -1059,6 +1064,18 @@ fn undress_the_forge(
     forge::leave(commands.reborrow(), rig);
     hud::show(&mut hud, true);
     grab_mouse(&mut cursor, true);
+}
+
+/// The rig is read, not aimed at: the mouse comes back so a player on a keyboard is not
+/// spinning the world behind it while they walk the graph.
+fn let_go_of_the_mouse(
+    mut intent: ResMut<Intent>,
+    mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>,
+) {
+    // Same reason the pause menu does it: a walk in progress has to be let go of, or the
+    // player steps off a cliff while looking at what a car is made of.
+    *intent = Intent::default();
+    grab_mouse(&mut cursor, false);
 }
 
 /// Where everybody is: this player, plus the last pose each peer sent. What the placement
@@ -2462,16 +2479,4 @@ mod tests {
         let host_saw = host_side.join().expect("the host side");
         assert_eq!(host_saw, HashSet::from([b_id]), "the host's own set");
     }
-}
-
-/// The rig is read, not aimed at: the mouse comes back so a player on a keyboard is not
-/// spinning the world behind it while they walk the graph.
-fn let_go_of_the_mouse(
-    mut intent: ResMut<Intent>,
-    mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>,
-) {
-    // Same reason the pause menu does it: a walk in progress has to be let go of, or the
-    // player steps off a cliff while looking at what a car is made of.
-    *intent = Intent::default();
-    grab_mouse(&mut cursor, false);
 }

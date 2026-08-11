@@ -1,1 +1,5 @@
 /target
+
+# `blockgame craft-film` writes a few hundred PNGs; the gif built from them is what
+# belongs in the repo.
+/craft-frames/

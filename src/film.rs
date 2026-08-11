@@ -32,6 +32,11 @@ const FPS: u32 = 24;
 /// the frame the last one was asked for loses it.
 const TAIL: u32 = 12;
 
+/// Frames run before the first one is kept. A bevy app's first frames have a half-built
+/// render graph, and the rig's camera is the *second* one in this app — early on it draws
+/// nothing at all, which reads as a bug in the rig rather than as the warm-up it is.
+const SETTLE: u32 = 10;
+
 #[derive(Resource)]
 struct Film {
     out: PathBuf,
@@ -62,8 +67,9 @@ fn script() -> Vec<Beat> {
         // Back up to the car, whose ring has just gone green, and build it.
         Beat(172, |n| n.down = -1),
         Beat(190, |n| n.craft = true),
-        // Then down to the nail and re-centre on it: six things sprout above it at once,
-        // which is what a part with six parents looks like.
+        // Then down into the parts and re-centre there: the whole tree the wood is in
+        // sprouts at once, six products across the top on crossing strings, which is what
+        // a graph looks like when you stand at the bottom of one.
         Beat(232, |n| n.down = 1),
         Beat(246, |n| n.focus = true),
     ]);
@@ -113,7 +119,12 @@ pub fn run(out: PathBuf, frames: u32) -> anyhow::Result<()> {
                 pay_for_it,
                 forge::rebuild,
                 forge::react,
-                forge::animate,
+                forge::beads,
+                forge::notches,
+                forge::nodes,
+                forge::cursor,
+                forge::flight,
+                forge::eye,
                 shoot,
             )
                 .chain(),
@@ -211,11 +222,15 @@ fn scenery(
     ));
 }
 
-/// The script's finger on the pad.
+/// The script's finger on the pad. Counted in *kept* frames, so the beats land where the
+/// film shows them landing however long the warm-up takes.
 fn press(film: Res<Film>, mut nav: ResMut<forge::Nav>) {
     *nav = forge::Nav::default();
+    let Some(kept) = film.frame.checked_sub(SETTLE) else {
+        return;
+    };
     for beat in script() {
-        if beat.0 == film.frame {
+        if beat.0 == kept {
             beat.1(&mut nav);
         }
     }
@@ -231,12 +246,16 @@ fn pay_for_it(mut requests: ResMut<forge::CraftRequests>, mut stock: ResMut<forg
 fn shoot(mut film: ResMut<Film>, mut commands: Commands, mut exit: MessageWriter<AppExit>) {
     let frame = film.frame;
     film.frame += 1;
-    if frame < film.last {
-        let path = film.out.join(format!("frame_{frame:05}.png"));
+    if frame < SETTLE {
+        return;
+    }
+    let kept = frame - SETTLE;
+    if kept < film.last {
+        let path = film.out.join(format!("frame_{kept:05}.png"));
         commands
             .spawn(Screenshot::primary_window())
             .observe(save_to_disk(path));
-    } else if frame >= film.last + TAIL {
+    } else if kept >= film.last + TAIL {
         exit.write(AppExit::Success);
     }
 }

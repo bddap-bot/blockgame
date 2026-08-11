@@ -67,7 +67,7 @@ enum Command {
     /// Drive the crafting rig through a scripted session and write one PNG per frame.
     /// The only honest review of a thing whose whole language is motion.
     CraftFilm {
-        #[arg(long, default_value = "docs/design/craft-frames")]
+        #[arg(long, default_value = "craft-frames")]
         out: std::path::PathBuf,
         #[arg(long, default_value_t = 268)]
         frames: u32,

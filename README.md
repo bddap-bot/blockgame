@@ -55,7 +55,11 @@ joining player ignores their own seed and gets the host's world.
 | swing / fire   | hold left click  | hold `R2`            |
 | place block    | right click      | `L2`                 |
 | hotbar         | `1`–`9`, `Q`/`E` | d-pad                |
-| craft          | `C`              | `X`                  |
+| open the rig   | `C`              | `X`                  |
+| walk the rig   | arrows, `WASD`   | d-pad                |
+| make one       | `C`              | `X`                  |
+| stand on it    | `Enter`          | `A`                  |
+| leave the rig  | `Esc` / `R`      | `B` / `Start`        |
 | get in / out   | `R`              | `B`                  |
 | pause menu     | `Esc`            | `Start`              |
 | menus          | arrows, `Enter`  | d-pad / stick, `A`   |
@@ -84,10 +88,29 @@ zooms — so the game has one code path through all of them, and a new tool is a
 
 You start empty-handed. Breaking a block puts it in your pocket; placing one spends it.
 
-The hotbar along the bottom is everything there is to hold, and it is also the crafting
-menu — there is no second screen and no grid to arrange. Walk the cursor onto a thing and
-the line above tells you what it is made of; press craft and, if you have the parts, you
-have one.
+The hotbar along the bottom is everything there is to hold. Press craft and **the rig**
+unfolds in the air in front of you, on whatever the hotbar cursor was on.
+
+![the crafting rig: a car above wood, nails and stone, wired together by beaded strings](docs/design/crafting-forge.gif)
+
+Nothing in it is written. The thing you are making hangs in the middle, what it is made of
+hangs below it, and what it goes into hangs above. Every recipe is a glowing string with
+one bead on it per unit that recipe asks for — lit for the ones you have, dark for the ones
+you still owe — so "eight nails, you have three" is five dark beads and not a sentence. The
+bar of notches beside a thing is how many you own, and the ring around the cursor is green
+when the button in your hand would make one right now.
+
+The d-pad walks it exactly as it walks the hotbar: left and right along a row, up and down
+between rows. Craft makes one; `A` re-centres the rig on whatever you are pointing at, and
+whatever *that* is made of unfolds under it.
+
+One press makes one thing, deepest first, so holding craft on a car makes its eight nails
+one at a time and then the car — the multi-step build, with the wait replaced by watching
+it happen.
+
+It is a **graph**, not a tree: a part two things need is one node with two strings leaving
+it, which today's stone already is — the car needs stone, and so does every nail the car
+needs.
 
 |             | made of                    |
 |-------------|----------------------------|
@@ -173,7 +196,9 @@ puts him at the wheel, which is how the seat above got checked.
 |---------------------|-----------------------------------------------------------------|
 | `src/registry.rs`   | **every block and item in the game** — start here to add content |
 | `src/inventory.rs`  | what a player has, and what crafting spends                      |
-| `src/hud.rs`        | crosshair, status line, and the hotbar you craft from            |
+| `src/hud.rs`        | crosshair, status line, and the hotbar                           |
+| `src/forge.rs`      | **the crafting rig** — the recipe graph, drawn without words     |
+| `src/film.rs`       | `craft-film`: the rig, driven by a script, one PNG a frame       |
 | `src/world.rs`      | chunk storage and seed-deterministic terrain                     |
 | `src/mesh.rs`       | turning voxels into geometry                                     |
 | `src/player.rs`     | movement, collision, and what a landing costs                    |
