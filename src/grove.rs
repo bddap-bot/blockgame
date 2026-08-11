@@ -36,10 +36,9 @@ use crate::avatar::{self, Palette};
 use crate::craftgraph::{Dir, Edge, Graph, Node};
 use crate::input::{KEYS, PAD};
 use crate::inventory::{Held, Inventory};
-use crate::registry::Item;
 
 /// Sideways room per layout unit, in blocks.
-const COLUMN: f32 = 3.4;
+const COLUMN: f32 = 2.9;
 /// How much higher each row stands than the one it is made from.
 const RISE: f32 = 5.0;
 /// How much further away, too. The graph leans back as it climbs, so travelling up it is
@@ -165,6 +164,31 @@ fn span(graph: &Graph, edge: &Edge) -> (Vec3, Vec3) {
     (a + along * HUB, b - along * HUB)
 }
 
+/// How wide the camera's view is. The Deck's panel and the television are both about this,
+/// and being a little wrong here only costs a little margin round the edge of the graph.
+const ASPECT: f32 = 1.6;
+/// The camera's vertical angle of view.
+const FOV: f32 = 45.0 * std::f32::consts::PI / 180.0;
+/// Room left round the outside of the graph: half a node, plus the strip of earth.
+const MARGIN: f32 = 3.0;
+
+/// Where everything is, corner to corner, with room to breathe round it.
+fn extent(all: &[Vec3]) -> (Vec3, Vec3) {
+    let low = all.iter().copied().fold(Vec3::MAX, Vec3::min);
+    let high = all.iter().copied().fold(Vec3::MIN, Vec3::max);
+    (low - MARGIN, high + MARGIN)
+}
+
+/// Slides `want` along one axis until everything between `low` and `high` is on screen —
+/// or, if that stretch is wider than the screen, centres it and lets the ends go.
+fn keep_in(want: f32, low: f32, high: f32, half: f32) -> f32 {
+    if high - low > 2.0 * half {
+        want.clamp(low + half, high - half)
+    } else {
+        (low + high) / 2.0
+    }
+}
+
 /// Where along its line a bead sits, `0` at the ingredient and `1` at the thing it makes.
 fn bead_at(ordinal: u32, count: u32, flowing: f32) -> f32 {
     ((ordinal as f32 + 0.5) / count as f32 + flowing).fract()
@@ -193,7 +217,7 @@ pub fn open(
 ) {
     let ink = Ink {
         unmet: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.13, 0.14, 0.17),
+            base_color: Color::srgb(0.26, 0.27, 0.33),
             perceptual_roughness: 0.95,
             ..default()
         }),
@@ -205,7 +229,7 @@ pub fn open(
         bead: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
         // A unit cylinder up `+Y`, stretched and turned into whichever line it is.
         line: meshes.add(Cylinder::new(1.0, 1.0)),
-        plate: meshes.add(Cylinder::new(1.15, 0.16)),
+        plate: meshes.add(Cylinder::new(1.0, 0.12)),
         ring: meshes.add(Torus::new(1.34, 1.54)),
         arrow: meshes.add(Cone {
             radius: 0.34,
@@ -229,9 +253,16 @@ pub fn open(
         + 7.0;
     commands.entity(root).with_children(|grove| {
         grove.spawn((
-            Mesh3d(meshes.add(Cuboid::new(ground, 2.6, 4.5))),
-            MeshMaterial3d(palette.item(Item::Dirt)),
-            Transform::from_xyz(0.0, -2.6, 0.0),
+            Mesh3d(meshes.add(Cuboid::new(ground, 1.4, 3.4))),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                // Darker than the dirt block it stands for: this is the floor of the
+                // picture, and a lit slab across the bottom of the screen out-shouts every
+                // small bright thing above it.
+                base_color: Color::srgb(0.16, 0.11, 0.07),
+                perceptual_roughness: 1.0,
+                ..default()
+            })),
+            Transform::from_xyz(0.0, -2.1, 0.0),
         ));
     });
 
@@ -251,7 +282,7 @@ pub fn open(
                 node_root.spawn((
                     Mesh3d(ink.plate.clone()),
                     MeshMaterial3d(palette.item(node.item)),
-                    Transform::from_xyz(0.0, -1.08, 0.0),
+                    Transform::from_xyz(0.0, -1.06, 0.0),
                 ));
                 for ordinal in 0..TALLY_MAX {
                     node_root.spawn((
@@ -317,11 +348,21 @@ pub fn open(
         }
         grove.spawn((
             DirectionalLight {
-                illuminance: 6_500.0,
+                illuminance: 11_000.0,
                 shadows_enabled: false,
                 ..default()
             },
-            Transform::from_xyz(-6.0, 14.0, 18.0).looking_at(Vec3::ZERO, Vec3::Y),
+            Transform::from_xyz(-8.0, 16.0, 20.0).looking_at(Vec3::ZERO, Vec3::Y),
+        ));
+        // A cold fill from the other side, so the face of a shape turned away from the key
+        // light is still a shape rather than a silhouette.
+        grove.spawn((
+            DirectionalLight {
+                illuminance: 3_200.0,
+                shadows_enabled: false,
+                ..default()
+            },
+            Transform::from_xyz(14.0, 4.0, -12.0).looking_at(Vec3::ZERO, Vec3::Y),
         ));
     });
 
@@ -335,13 +376,13 @@ pub fn open(
             ..default()
         },
         Projection::Perspective(PerspectiveProjection {
-            fov: 45f32.to_radians(),
+            fov: FOV,
             far: 400.0,
             ..default()
         }),
         AmbientLight {
-            color: Color::srgb(0.8, 0.86, 1.0),
-            brightness: 340.0,
+            color: Color::srgb(0.62, 0.72, 1.0),
+            brightness: 150.0,
             ..default()
         },
         Transform::from_xyz(0.0, 6.0, 22.0).looking_at(Vec3::new(0.0, 4.0, 0.0), Vec3::Y),
@@ -533,11 +574,9 @@ pub fn beads(
         );
         at.translation = a.lerp(b, along);
         let size = if have { BEAD } else { BEAD_UNMET };
-        at.scale = Vec3::splat(if grove.family[edge.to] {
-            size
-        } else {
-            size * FADED
-        });
+        // Beads answer "how many of these do I need", and that is only being asked about
+        // the thing under the cursor. Everywhere else they are a field of confetti.
+        at.scale = Vec3::splat(if grove.family[edge.to] { size } else { 0.0 });
         let want = if have {
             palette.item(from)
         } else {
@@ -625,24 +664,34 @@ pub fn fly(
     mut cam: Query<&mut Transform, With<GroveCam>>,
 ) {
     let here = stand(&grove.graph.nodes()[cursor.at]);
-    let lit: Vec<Vec3> = grove
-        .graph
-        .nodes()
+    let all: Vec<Vec3> = grove.graph.nodes().iter().map(stand).collect();
+    let lit: Vec<Vec3> = all
         .iter()
         .enumerate()
         .filter(|(i, _)| grove.family[*i])
-        .map(|(_, n)| stand(n))
+        .map(|(_, p)| *p)
         .collect();
-    let middle = lit.iter().copied().sum::<Vec3>() / lit.len().max(1) as f32;
-    let spread = lit
-        .iter()
-        .map(|p| p.distance(middle))
-        .fold(0.0, f32::max)
-        .min(24.0);
+    let spread = {
+        let middle = lit.iter().copied().sum::<Vec3>() / lit.len().max(1) as f32;
+        lit.iter()
+            .map(|p| p.distance(middle))
+            .fold(0.0, f32::max)
+            .min(26.0)
+    };
 
-    let look = here.lerp(middle, 0.34);
+    // Held closer to the middle of the whole graph than to the cursor. A camera that centres
+    // the cursor puts the graph off the side of the screen the moment the cursor is at one
+    // end of a row, and a child who cannot see the rest of it cannot aim at it.
+    let whole = all.iter().copied().sum::<Vec3>() / all.len() as f32;
+    let dist = (15.0 + spread * 0.75).max(21.0);
+    let mut look = here.lerp(whole, 0.55);
+    let (low, high) = extent(&all);
+    let half = Vec2::new(dist * ASPECT, dist) * (FOV / 2.0).tan();
+    look.x = keep_in(look.x, low.x, high.x, half.x);
+    look.y = keep_in(look.y, low.y, high.y, half.y);
+
     let sway = Quat::from_rotation_y((time.elapsed_secs() * 0.21).sin() * 0.15);
-    let want = Transform::from_translation(look + sway * Vec3::new(0.0, 2.6, 12.0 + spread * 0.55))
+    let want = Transform::from_translation(look + sway * Vec3::new(0.0, 0.0, dist))
         .looking_at(look, Vec3::Y);
 
     let ease = 1.0 - (-time.delta_secs() / (EASE * 3.0)).exp();

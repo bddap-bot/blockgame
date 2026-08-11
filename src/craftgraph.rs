@@ -1,4 +1,4 @@
-//! The recipe graph and where its nodes stand — the model behind [`crate::crafttree`].
+//! The recipe graph and where its nodes stand — the model behind [`crate::grove`].
 //!
 //! Pure arithmetic over [`crate::registry`]: no Bevy, no rendering, no input. Everything
 //! here is a fact about the recipes themselves, so the layout and the way a d-pad walks it
@@ -12,7 +12,7 @@
 use crate::registry::Item;
 
 /// Sideways distance between two neighbours on the same row, in layout units. Multiplied
-/// into world space by [`crate::crafttree::COLUMN`].
+/// into world space by [`crate::grove`].
 const MIN_GAP: f32 = 1.0;
 
 /// Passes of the barycentre relaxation. Four is where the current recipe set stops moving;

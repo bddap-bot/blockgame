@@ -55,7 +55,7 @@ joining player ignores their own seed and gets the host's world.
 | swing / fire   | hold left click  | hold `R2`            |
 | place block    | right click      | `L2`                 |
 | hotbar         | `1`–`9`, `Q`/`E` | d-pad                |
-| craft          | `C`              | `X`                  |
+| open the grove | `C`              | `X`                  |
 | get in / out   | `R`              | `B`                  |
 | pause menu     | `Esc`            | `Start`              |
 | menus          | arrows, `Enter`  | d-pad / stick, `A`   |
@@ -84,10 +84,23 @@ zooms — so the game has one code path through all of them, and a new tool is a
 
 You start empty-handed. Breaking a block puts it in your pocket; placing one spends it.
 
-The hotbar along the bottom is everything there is to hold, and it is also the crafting
-menu — there is no second screen and no grid to arrange. Walk the cursor onto a thing and
-the line above tells you what it is made of; press craft and, if you have the parts, you
-have one.
+Press craft and the world falls away, and you are looking at **the grove** — every recipe
+in the game at once, as a place. There is not one word on the screen, because the child it
+is for cannot read one.
+
+![the grove: the recipe graph as a place you fly around](docs/design/grove.gif)
+
+The six things you dig up are on the ground. Everything you make stands above whatever it
+is made of, so how high a thing is *is* how far it is from a shovel. A line is an
+ingredient, painted the colour of what runs along it, and the beads on that line are how
+many it takes — eight nails is eight beads, and they light up from the bottom as you
+gather, so three lit and five dark is "three of the eight". The one thing on screen that
+moves is a thing you could make right now: it bobs, and every line into it marches. The
+d-pad walks the lines, the four arrows round the cursor are the directions that lead
+somewhere, and craft makes what the cursor is on.
+
+The hotbar along the bottom of the world is still what you are holding, and the line above
+it still says what the cursor is on for whoever *can* read.
 
 |             | made of                    |
 |-------------|----------------------------|
@@ -173,7 +186,10 @@ puts him at the wheel, which is how the seat above got checked.
 |---------------------|-----------------------------------------------------------------|
 | `src/registry.rs`   | **every block and item in the game** — start here to add content |
 | `src/inventory.rs`  | what a player has, and what crafting spends                      |
-| `src/hud.rs`        | crosshair, status line, and the hotbar you craft from            |
+| `src/hud.rs`        | crosshair, status line, and the hotbar                           |
+| `src/craftgraph.rs` | the recipes as a graph, ranked and laid out — no drawing in it   |
+| `src/grove.rs`      | **the crafting screen** — that graph, drawn without words       |
+| `src/grovefilm.rs`  | `blockgame grove` — plays that screen to itself, frame by frame  |
 | `src/world.rs`      | chunk storage and seed-deterministic terrain                     |
 | `src/mesh.rs`       | turning voxels into geometry                                     |
 | `src/player.rs`     | movement, collision, and what a landing costs                    |

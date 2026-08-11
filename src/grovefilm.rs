@@ -32,7 +32,7 @@ pub const FPS: u32 = 16;
 
 /// Frames rendered before the first is kept. A Bevy app's first frames have no prepared
 /// meshes and a half-built render graph.
-const SETTLE: u32 = 10;
+const SETTLE: u32 = 26;
 /// Frames after the last one is asked for, so the screenshots in flight land on disk.
 const DRAIN: u32 = 90;
 
@@ -135,7 +135,7 @@ pub fn run(out: PathBuf) -> anyhow::Result<()> {
             out,
             frame: 0,
             beat: 0,
-            due: SETTLE,
+            due: SETTLE + FILM[0].wait,
             last,
         })
         .init_resource::<Intent>()

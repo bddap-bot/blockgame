@@ -11,6 +11,7 @@
 //! [`crate::vehicle::SEAT`] be one offset between them.
 
 use bevy::prelude::*;
+use std::f32::consts::PI;
 
 use crate::registry::Item;
 
@@ -149,7 +150,7 @@ pub const CAR: &[Part] = &[
 ];
 
 /// **What each item looks like when it is being shown rather than held** — the silhouettes
-/// [`crate::crafttree`] hangs on the recipe graph.
+/// [`crate::grove`] hangs on the recipe graph.
 ///
 /// A child who cannot read tells a hammer from a rifle by its *shape*, so the graph cannot
 /// be fourteen coloured cubes. Each row below is the same table of boxes every other model
@@ -291,12 +292,23 @@ const PARACHUTE: &[Part] = &[
 pub fn spawn_icon(commands: &mut Commands, palette: &Palette, item: Item) -> Entity {
     let parts = icon(item);
     let (centre, size) = bounds(parts);
-    let fit = 1.0 / size.max_element();
+    // Fitted on what is *seen* — width and height — and not on depth. A car is twice as
+    // long as it is wide, and scaling it to fit its own length turns it into a speck beside
+    // a nail. Depth is free to stick out towards whoever is looking.
+    let fit = 1.0 / size.xy().max_element();
+    // A model longer than it is wide is a vehicle, and every vehicle in this file faces
+    // `-Z` — away. Turn it round, and give everything the same few degrees off square, so a
+    // box reads as a box rather than as a rectangle.
+    let turn = Quat::from_rotation_y(if size.z > size.x { PI } else { 0.0 } - 0.38);
     commands
         .spawn((Transform::default(), Visibility::Visible))
         .with_children(|root| {
             root.spawn((
-                Transform::from_translation(-centre * fit).with_scale(Vec3::splat(fit)),
+                Transform {
+                    translation: turn * (-centre * fit),
+                    rotation: turn,
+                    scale: Vec3::splat(fit),
+                },
                 Visibility::Visible,
             ))
             .with_children(|fitted| build(fitted, palette, parts));
@@ -636,9 +648,9 @@ mod tests {
                 size.min_element() > 0.0,
                 "{item:?}'s icon is flat in some direction and vanishes edge-on"
             );
-            let fit = 1.0 / size.max_element();
+            let fit = 1.0 / size.xy().max_element();
             assert!(
-                ((size * fit).max_element() - 1.0).abs() < 1e-4,
+                ((size * fit).xy().max_element() - 1.0).abs() < 1e-4,
                 "{item:?} does not fill its cell"
             );
         }
