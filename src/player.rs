@@ -249,10 +249,6 @@ impl Player {
         matches!(self.motion, Motion::Flying)
     }
 
-    pub fn is_driving(&self) -> bool {
-        self.ride.is_driving()
-    }
-
     /// Puts them on their feet, at rest. Getting into a car and getting out of one both go
     /// through here: a driver who took off flying would step out into the sky, and one who
     /// got in mid-fall would step out still carrying the speed of it.

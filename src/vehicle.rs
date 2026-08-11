@@ -128,10 +128,6 @@ impl Ride {
             Ride::Parked(car) | Ride::Driving(car) => Some(car),
         }
     }
-
-    pub fn is_driving(self) -> bool {
-        matches!(self, Ride::Driving(_))
-    }
 }
 
 /// What is under a car.
@@ -583,7 +579,7 @@ mod tests {
         let car = park_in_front(&w, start, EAST).expect("standing on the test floor");
         let (mut ride, feet) = toggle_ride(Ride::Parked(car), start);
         assert!(
-            ride.is_driving(),
+            matches!(ride, Ride::Driving(_)),
             "could not get into a car parked in reach"
         );
 
@@ -657,7 +653,5 @@ mod tests {
         assert_eq!(Ride::Pocketed.car(), None);
         assert_eq!(Ride::Parked(car).car(), Some(car));
         assert_eq!(Ride::Driving(car).car(), Some(car));
-        assert!(Ride::Driving(car).is_driving());
-        assert!(!Ride::Parked(car).is_driving());
     }
 }

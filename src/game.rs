@@ -9,7 +9,7 @@
 
 use bevy::input::InputSystems;
 use bevy::prelude::*;
-use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
+use bevy::window::{CursorGrabMode, CursorOptions, MonitorSelection, PrimaryWindow, WindowMode};
 use std::collections::{HashMap, HashSet};
 
 use crate::avatar;
@@ -230,7 +230,12 @@ pub fn run(start: Start) -> anyhow::Result<()> {
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: "blockgame".into(),
-            resolution: (1280u32, 800u32).into(),
+            // Borderless fullscreen at whatever the screen really is, never a fixed size:
+            // a 1280x800 window is native on the Deck's panel but a quarter-resolution
+            // image on the TV, which gamescope then stretches to 3840x2160. The HUD is
+            // laid out for 800 rows and scaled back up by [`hud::scale_to_screen`], so
+            // the world gets the pixels and the hotbar keeps its size.
+            mode: WindowMode::BorderlessFullscreen(MonitorSelection::Current),
             ..default()
         }),
         ..default()
@@ -261,6 +266,10 @@ pub fn run(start: Start) -> anyhow::Result<()> {
     // the frame the menu came up and closed it again within it. The menu was
     // unreachable and nothing was on fire.
     .add_systems(PreUpdate, gather_menu_intent.after(InputSystems))
+    // Every screen the game draws is sized for the Deck's 800 rows, the title included, so
+    // this runs whatever phase we are in and not just once: a TV that changes mode under
+    // us is a resize like any other.
+    .add_systems(Update, hud::scale_to_screen)
     .add_systems(OnEnter(Phase::Title), title::enter)
     .add_systems(OnExit(Phase::Title), title::leave)
     .add_systems(
@@ -305,7 +314,6 @@ pub fn run(start: Start) -> anyhow::Result<()> {
             stream_chunks,
             remesh_dirty,
             net_send_pose,
-            hud::update_status,
             hud::update_hotbar,
             hud::fade_notice,
             open_pause_menu.run_if(in_state(Playing::Live)),

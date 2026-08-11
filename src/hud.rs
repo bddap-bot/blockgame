@@ -1,4 +1,10 @@
-//! Everything drawn over the world: the crosshair, the status line, and the hotbar.
+//! Everything drawn over the world: the crosshair, the hotbar, and the two lines the game
+//! says — what the cursor is on, and the occasional notice that fades.
+//!
+//! Nothing sits permanently at the top of the screen. A status plate lived up there once,
+//! carrying the host's 64-character join ticket; it is the first thing you see across a
+//! living room and the last thing anybody reads, and the pause menu shares the ticket
+//! on request anyway.
 //!
 //! The hotbar is also the crafting menu. There is no second screen to open, no grid to
 //! arrange and no order to get right — you walk the cursor onto a thing and press craft,
@@ -9,11 +15,10 @@
 //! no change to this file.
 
 use bevy::prelude::*;
+use bevy::window::PrimaryWindow;
 
-use crate::game::{Me, NetRole, Peers};
 use crate::inventory::{Held, Inventories};
-use crate::net::{Role, Session};
-use crate::player::{self, Condition, Player};
+use crate::net::Session;
 use crate::registry::{Class, HOTBAR_COLUMNS, Item};
 
 /// Cell size, in the Deck's 1280x800 pixels. Seven of these across is 766px — wide enough
@@ -25,9 +30,10 @@ const CELL_FONT: f32 = 16.0;
 /// hotbar is two kinds of coloured box and nothing else.
 const RING: f32 = 3.0;
 
-/// The status line, top left.
-#[derive(Component)]
-pub struct StatusText;
+/// The screen the whole HUD is drawn for: the Deck's panel. Every size in this file is in
+/// its pixels, and [`scale_to_screen`] scales them to the panel actually in front of the
+/// player.
+const DESIGN_ROWS: f32 = 800.0;
 
 /// What the cursor is on and what it costs, directly above the hotbar.
 #[derive(Component)]
@@ -88,28 +94,7 @@ pub fn setup(mut commands: Commands) {
             ));
         });
 
-    // Top left, because the hotbar owns the bottom of the screen and the host's join
-    // ticket is 64 characters wide — the two would overlap anywhere else.
-    commands.spawn((
-        StatusText,
-        Text::new(""),
-        TextFont {
-            font_size: 22.0,
-            ..default()
-        },
-        TextColor(Color::WHITE),
-        Node {
-            position_type: PositionType::Absolute,
-            left: Val::Px(16.0),
-            top: Val::Px(16.0),
-            padding: UiRect::axes(Val::Px(10.0), Val::Px(4.0)),
-            ..default()
-        },
-        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)),
-    ));
-
-    // Top centre: the one part of the screen neither the status line nor the hotbar
-    // wants, and where the eye already is.
+    // Top centre, where the eye already is — and empty the rest of the time.
     commands.spawn((
         NoticeText,
         Text::new(""),
@@ -121,7 +106,7 @@ pub fn setup(mut commands: Commands) {
         TextLayout::new_with_justify(Justify::Center),
         Node {
             position_type: PositionType::Absolute,
-            top: Val::Px(104.0),
+            top: Val::Px(40.0),
             left: Val::Percent(15.0),
             width: Val::Percent(70.0),
             padding: UiRect::axes(Val::Px(12.0), Val::Px(8.0)),
@@ -209,66 +194,32 @@ fn spawn_cell(parent: &mut ChildSpawnerCommands, item: Item) {
         });
 }
 
-pub fn update_status(
-    me: Res<Me>,
-    role: Res<NetRole>,
-    session: NonSend<Session>,
-    peers: Res<Peers>,
-    mut text: Query<&mut Text, With<StatusText>>,
-) {
-    let Ok(mut text) = text.single_mut() else {
+/// Keeps the HUD the size it looks on the Deck, whatever screen it is really on.
+///
+/// The window is borderless fullscreen, so on the TV it is 2160 rows rather than the Deck's
+/// 800 and every size in this file would be a third of the height it was drawn for —
+/// a hotbar nobody can read from a sofa. Scaling the UI rather than shrinking the window is
+/// what lets the world keep the pixels: the 3D camera renders at the screen's real
+/// resolution either way.
+pub fn scale_to_screen(window: Query<&Window, With<PrimaryWindow>>, mut ui: ResMut<UiScale>) {
+    let Ok(window) = window.single() else {
         return;
     };
-    // The ticket gets its own line: 64 characters do not share a row with anything else
-    // on the Deck's 1280px panel.
-    let who = match role.0 {
-        Role::Host => format!("join ticket:  {}", session.ticket()),
-        Role::Peer { .. } => "in a friend's world".to_string(),
+    let Some(want) = ui_scale(window.resolution.height()) else {
+        return;
     };
-    write(
-        &mut text,
-        format!("{}\n{who}", status(&me.0, peers.0.len() + 1)),
-    );
-}
-
-/// Characters wide the health bar is: one per heart.
-const HEARTS: usize = player::MAX_HEALTH as usize;
-const _: () = assert!(HEARTS as f32 == player::MAX_HEALTH);
-
-/// The first line of the status text: what they are doing, who else is here, and how they
-/// are. Built here rather than inline so `the_status_line_fits_the_deck_panel` measures the
-/// line the player really sees and not a copy of it.
-///
-/// ASCII only: bevy's built-in font has no glyph for a middle dot, and a missing glyph draws
-/// as a tofu box.
-fn status(me: &Player, players: usize) -> String {
-    let mode = match me.condition {
-        // What their body is doing beats where it is: "walking" beside "winded" is the HUD
-        // contradicting itself in one line, and a child reads the first word.
-        Condition::Winded { .. } => "lying down",
-        Condition::Well { .. } if me.is_driving() => "driving",
-        Condition::Well { .. } if me.is_flying() => "flying",
-        Condition::Well { .. } => "walking",
-    };
-    format!("{mode}  |  {players} player(s)  |  {}", health_bar(me))
-}
-
-/// The health bar, or what is happening instead of one.
-///
-/// Drawn out of hashes because bevy's built-in font has no heart in it, and a bar of
-/// characters is legible across the room on the Deck's panel where a number is not.
-fn health_bar(me: &Player) -> String {
-    match me.condition {
-        Condition::Well { health } => {
-            // Floor, so a fall that cost most of a heart takes one off the bar. Rounding up
-            // instead hides every drop under seven blocks, which is the whole range a small
-            // child lives in — and the `1` floor is what stops it reading empty while its
-            // owner is up and walking about.
-            let full = (health.floor() as usize).clamp(1, HEARTS);
-            format!("health [{}{}]", "#".repeat(full), "-".repeat(HEARTS - full))
-        }
-        Condition::Winded { .. } => "winded - catching your breath".to_string(),
+    // Written only when it really changes: assigning through the `ResMut` marks `UiScale`
+    // changed, and changed `UiScale` re-lays-out the whole HUD.
+    if ui.0 != want {
+        ui.0 = want;
     }
+}
+
+/// How much bigger this screen is than the one the HUD was drawn for. `None` for a window
+/// with no height yet — a scale of zero collapses the HUD to nothing, and a window that
+/// briefly reports no rows is ordinary on the way up.
+fn ui_scale(rows: f32) -> Option<f32> {
+    (rows > 0.0).then(|| rows / DESIGN_ROWS)
 }
 
 /// Sets a label, and only when it actually reads differently.
@@ -419,15 +370,6 @@ fn readable_on(r: f32, g: f32, b: f32) -> Color {
 mod tests {
     use super::*;
 
-    /// A player who has taken `hearts` of damage — built through [`Condition::hurt`] rather
-    /// than by writing a `Condition` down, so the states the bar is shown are states the game
-    /// can really reach.
-    fn hurt_by(hearts: f32) -> Player {
-        let mut me = Player::spawn_at(Vec3::ZERO);
-        me.condition.hurt(hearts);
-        me
-    }
-
     /// Every item gets exactly one cell, and no row is wider than the d-pad's row step —
     /// otherwise pressing down skips a cell nobody can then reach in a straight line.
     #[test]
@@ -491,47 +433,15 @@ mod tests {
         assert_eq!(title(Item::Dirt), "dirt (block)", "dirt is just dirt");
     }
 
-    /// The one place a child is told they are hurt. Full reads full, a sliver still reads
-    /// as a heart — a bar that empties before its owner is down is a bar that lies — and
-    /// being down says what is happening instead of showing an empty bar.
+    /// The HUD keeps its apparent size on every screen: unchanged on the Deck's panel it
+    /// was drawn for, and 2.7x on the TV, where the same pixels would otherwise be a third
+    /// of the height. A window with no rows yet gets no scale at all — zero would collapse
+    /// the HUD to nothing.
     #[test]
-    fn the_health_bar_says_how_hurt_you_are() {
-        assert_eq!(health_bar(&hurt_by(0.0)), "health [##########]");
-        assert_eq!(health_bar(&hurt_by(6.0)), "health [####------]");
-        assert_eq!(
-            health_bar(&hurt_by(0.3)),
-            "health [#########-]",
-            "a fall you felt has to show on the bar"
-        );
-        assert_eq!(
-            health_bar(&hurt_by(player::MAX_HEALTH - 0.1)),
-            "health [#---------]",
-            "still standing, so still a heart"
-        );
-        assert_eq!(
-            health_bar(&hurt_by(player::MAX_HEALTH)),
-            "winded - catching your breath"
-        );
-    }
-
-    /// The status line shares the Deck's 1280px panel with nothing, but it is one line and
-    /// the health bar is new on it. Measured over every state it can be in, because the
-    /// longest is not the one anybody thinks of.
-    #[test]
-    fn the_status_line_fits_the_deck_panel() {
-        for hearts in [0.0, 6.0, player::MAX_HEALTH] {
-            // 22px of bevy's default font advances well under 13px a character.
-            let line = status(&hurt_by(hearts), 4);
-            assert!(line.len() * 13 <= 1280, "{} chars: {line}", line.len());
-        }
-    }
-
-    /// A player flat on their back is not "walking", whatever their feet are doing: the two
-    /// halves of one line are read together and must not contradict each other.
-    #[test]
-    fn the_line_does_not_say_walking_while_you_are_down() {
-        let down = status(&hurt_by(player::MAX_HEALTH), 1);
-        assert!(down.starts_with("lying down"), "{down}");
+    fn the_hud_is_scaled_to_the_screen_it_is_on() {
+        assert_eq!(ui_scale(800.0), Some(1.0), "the Deck's own panel");
+        assert_eq!(ui_scale(2160.0), Some(2.7), "the TV");
+        assert_eq!(ui_scale(0.0), None);
     }
 
     /// Light cells get dark text, dark cells get light text. Sand is the case that bites:
