@@ -27,7 +27,7 @@
 //! **What this module does not know.** It draws [`Pocket`] and it asks for crafts by
 //! pushing to [`CraftRequests`]. Whose pile that is, and who is allowed to say a craft
 //! happened, stays with the host in [`crate::game`] — so the same rig runs in the game,
-//! where the host answers, and under `blockgame craft-film`, where a test harness does.
+//! where the host answers, and under `blockgame film`, where a test harness does.
 
 use bevy::prelude::*;
 use std::collections::HashMap;
@@ -60,7 +60,7 @@ const FLIGHT: f32 = 0.42;
 const POP: f32 = 0.30;
 
 /// What the player is asking of the rig this frame. Filled from the pad in the game and
-/// from a script under `craft-film`, so the rig itself never asks which.
+/// from a script under `film`, so the rig itself never asks which.
 #[derive(Resource, Default, Debug, Clone, Copy)]
 pub struct Nav {
     /// Make one of whatever is in the middle.

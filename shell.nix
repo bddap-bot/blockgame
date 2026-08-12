@@ -25,7 +25,7 @@ pkgs.mkShell {
     libxrandr
 
     # A display to render into on a machine that has none — what `blockgame portrait`
-    # and `blockgame craft-film` are run under on the build box.
+    # and `blockgame film` are run under on the build box.
     xvfb-run
   ];
 

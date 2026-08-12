@@ -181,6 +181,7 @@ pub fn run(out: PathBuf, frames: u32) -> anyhow::Result<()> {
                     .chain()
                     .run_if(up),
                 hotbar::redraw,
+                hush,
                 shoot,
             )
                 .chain(),
@@ -325,6 +326,13 @@ fn close_the_rig(commands: Commands, nav: Res<forge::Nav>, rig: Query<Entity, Wi
     if nav.leave {
         forge::leave(commands, rig);
     }
+}
+
+/// The film has no speaker, and a queue nobody empties is a queue that grows all session.
+/// What the notes would have sounded like is on the screen anyway: every press flashes its
+/// key in that key's own colour, which is the same fact for an eye instead of an ear.
+fn hush(mut pad: ResMut<Pad>) {
+    pad.sounded.clear();
 }
 
 /// The film stands in for the host: a request it can afford is paid on the spot.
