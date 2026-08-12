@@ -6,12 +6,16 @@
 //! all a friend somewhere else needs — and the same code runs either way.
 
 mod avatar;
+mod code;
 mod film;
 mod forge;
 mod game;
+mod glyph;
+mod hotbar;
 mod hud;
 mod input;
 mod inventory;
+mod jingle;
 mod menu;
 mod mesh;
 mod net;
@@ -64,13 +68,15 @@ enum Command {
         #[arg(long)]
         car: bool,
     },
-    /// Drive the crafting rig through a scripted session and write one PNG per frame.
-    /// The only honest review of a thing whose whole language is motion.
-    CraftFilm {
-        #[arg(long, default_value = "craft-frames")]
+    /// Drive the pad and the crafting rig through a scripted session and write one PNG
+    /// per frame. The only honest review of two things whose whole language is motion.
+    Film {
+        #[arg(long, default_value = "film-frames")]
         out: std::path::PathBuf,
-        #[arg(long, default_value_t = 268)]
-        frames: u32,
+        /// How many frames to keep. The script is as long as it is; this is here to cut
+        /// it short while you are working on the first few seconds of it.
+        #[arg(long)]
+        frames: Option<u32>,
     },
 }
 
@@ -94,7 +100,9 @@ fn main() -> Result<()> {
             };
             return portrait::run(out, holding, subject);
         }
-        Some(Command::CraftFilm { out, frames }) => return film::run(out, frames),
+        Some(Command::Film { out, frames }) => {
+            return film::run(out, frames.unwrap_or_else(film::length));
+        }
         Some(Command::Join { ticket }) => Some(ticket),
         None => None,
     };

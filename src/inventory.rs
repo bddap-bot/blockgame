@@ -154,10 +154,21 @@ impl Inventories {
     }
 }
 
-/// Which item the local player has selected — the hotbar cursor.
+/// The local player's pile, as its owner last stated it — the one picture every surface
+/// draws.
 ///
-/// Separate from the inventory because you may point at something you have none of: that
-/// is how you read its recipe and decide to make one.
+/// A copy rather than a borrow of the authoritative [`Inventories`]: the pad and the rig
+/// are pictures of somebody's things and never the record of them, and one-way means a
+/// drawing bug can never become a pile bug. The game refreshes it each frame; the film
+/// writes it directly, which is how the same two surfaces can be driven with no host and
+/// no network anywhere in the picture.
+#[derive(Resource, Default)]
+pub struct Pocket(pub Inventory);
+
+/// Which item the local player has picked — what the pad last typed.
+///
+/// Separate from the inventory because you may hold something you have none of: that is
+/// how you get the rig to show you its recipe and decide to make one.
 #[derive(Resource, Debug, Clone, Copy)]
 pub struct Held(pub Item);
 
