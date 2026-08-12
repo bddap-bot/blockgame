@@ -994,8 +994,6 @@ fn aim_zoom(
     }
 }
 
-/// The local player's craft button. Like an edit, it is a *request*: the host owns every
-/// pile, so a peer asks and waits to be told what it has.
 /// The craft button in the world opens the rig, on whatever the hotbar cursor is on.
 ///
 /// Making a thing is one press *inside* the rig now, not one press outside it: there is

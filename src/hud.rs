@@ -333,27 +333,39 @@ pub fn update_hotbar(
         } else if item.recipe().is_empty() {
             (format!("{} - dig it up", title(item)), Color::WHITE)
         } else {
-            let cost: Vec<String> = item
-                .recipe()
-                .iter()
-                .map(|(g, n)| format!("{n} {}", g.name()))
-                .collect();
-            let cost = cost.join(" + ");
-            if inventory.can_craft(item) {
-                (
-                    format!("{} = {cost}   press X to make one", title(item)),
-                    Color::srgb(0.55, 1.0, 0.55),
-                )
+            // The craft button opens the rig either way — it is the recipe that is short,
+            // not the door — so both cases say the same thing about the button and let the
+            // colour carry whether you can afford it. Two wordings for one button was a
+            // sentence that had to be kept true twice, and one of them stopped being.
+            let tint = if inventory.can_craft(item) {
+                Color::srgb(0.55, 1.0, 0.55)
             } else {
-                (
-                    format!("{} = {cost}   you need more", title(item)),
-                    Color::srgb(0.85, 0.85, 0.85),
-                )
-            }
+                Color::srgb(0.85, 0.85, 0.85)
+            };
+            (recipe_line(item), tint)
         };
         write(&mut text, line);
         *color = TextColor(tint);
     }
+}
+
+/// The line for something you do not own yet: what it is, what it costs, and what the
+/// craft button does about it.
+///
+/// A function rather than a `format!` where it is shown, because the test that keeps this
+/// line inside the Deck's panel has to measure the line the player really gets — a copy of
+/// the wording in the test is a width nobody is checking.
+fn recipe_line(item: Item) -> String {
+    let cost: Vec<String> = item
+        .recipe()
+        .iter()
+        .map(|(g, n)| format!("{n} {}", g.name()))
+        .collect();
+    format!(
+        "{} = {}   press X to open the rig",
+        title(item),
+        cost.join(" + ")
+    )
 }
 
 /// What a thing is and what it does: "rifle (tool, shoots 64 blocks, scoped)".
@@ -432,16 +444,7 @@ mod tests {
         // 1200px at that pessimistic width, inside the 1280 panel.
         const BUDGET: usize = 100;
         for item in Item::ALL {
-            let cost: Vec<String> = item
-                .recipe()
-                .iter()
-                .map(|(g, n)| format!("{n} {}", g.name()))
-                .collect();
-            let line = format!(
-                "{} = {}   press X to make one",
-                title(*item),
-                cost.join(" + ")
-            );
+            let line = recipe_line(*item);
             assert!(line.len() <= BUDGET, "{} chars: {line}", line.len());
         }
     }
