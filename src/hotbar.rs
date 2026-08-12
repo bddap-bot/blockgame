@@ -4,7 +4,7 @@
 //! under it two little d-pads with one arm lit on each — the code that got you there,
 //! which is also the code that gets you back. Press any direction and the whole pad blooms
 //! open: four clusters in a cross, four things in a cross on each cluster, laid out exactly
-//! as [`crate::code::ROSETTE`] is written. Press a second direction and it shuts on
+//! as [`crate::code`]'s ROSETTE is written. Press a second direction and it shuts on
 //! whatever you landed on.
 //!
 //! **Not one word anywhere.** A thing is its picture ([`crate::glyph`]) in its own colour
@@ -23,7 +23,7 @@
 
 use bevy::prelude::*;
 
-use crate::code::{self, Dir, Pad};
+use crate::code::{self, Code, Dir, Pad};
 use crate::glyph;
 use crate::input::Drum;
 use crate::inventory::{Held, Inventory, Pocket};
@@ -213,7 +213,7 @@ fn cluster(out: &mut Vec<Quad>, look: &Look, arm: Dir) {
     for (key, item) in Dir::ALL.iter().zip(code::arm(arm)) {
         let spot = at + key.unit() * KEY_STEP;
         match item {
-            Some(item) => cell(out, look, spot, item, *key, mine, lit * bloom),
+            Some(item) => cell(out, look, spot, item, Code { arm, key: *key }, lit * bloom),
             // A key with nothing behind it is drawn as a key with nothing behind it: the
             // pad has room, and a child who presses it and gets nothing has learnt where
             // the next thing is going to live.
@@ -226,15 +226,7 @@ fn cluster(out: &mut Vec<Quad>, look: &Look, arm: Dir) {
 
 /// One key: what is behind it, how many of them you have, and whether it is the one in
 /// your hand.
-fn cell(
-    out: &mut Vec<Quad>,
-    look: &Look,
-    at: Vec2,
-    item: Item,
-    key: Dir,
-    on_the_open_arm: bool,
-    lit: f32,
-) {
+fn cell(out: &mut Vec<Quad>, look: &Look, at: Vec2, item: Item, code: Code, lit: f32) {
     let n = look.pile.count(item);
     let w = CELL + 10.0;
     let h = CELL + 16.0;
@@ -249,13 +241,19 @@ fn cell(
     if item == look.held {
         ring(out, at, w, 2.5, 8.0, Color::WHITE.with_alpha(0.9 * lit));
     }
-    // The key that was just hit glows in its own colour. On the open arm that is the
-    // second press landing; anywhere else it is the first press of the next code.
+    // The key the code just landed on glows in its own colour while the pad shuts —
+    // the eye's copy of the high note. The opening press has the whole cluster's ring.
     if let Some((struck, heat)) = look.pad.flash()
-        && struck == key
-        && on_the_open_arm
+        && struck == code
     {
-        quad(out, at, w, h, 8.0, key.tint().with_alpha(0.45 * heat * lit));
+        quad(
+            out,
+            at,
+            w,
+            h,
+            8.0,
+            code.key.tint().with_alpha(0.45 * heat * lit),
+        );
     }
     // A thing you have none of is still drawn, still in its place, just dark — that is how
     // you find out it exists and go and read its recipe.
@@ -453,6 +451,13 @@ pub fn drum(time: Res<Time>, drum: Res<Drum>, mut pad: ResMut<Pad>, mut held: Re
     {
         held.0 = item;
     }
+}
+
+/// Shuts the pad on the way into a pause. The drum systems stop in Paused, so without
+/// this a half-typed code freezes the open pad behind the menu and its stale arm lands on
+/// the first press after resume.
+pub fn rest(mut pad: ResMut<Pad>) {
+    pad.shut();
 }
 
 /// Draws it, from scratch, every frame.

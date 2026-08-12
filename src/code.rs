@@ -216,7 +216,7 @@ pub struct Pad {
     bloom: f32,
     /// Seconds since the last press, for the flash that goes with it.
     since: f32,
-    struck: Option<Dir>,
+    struck: Option<Code>,
     /// Notes struck and not yet sounded, drained by whoever owns the speaker.
     pub sounded: Vec<Note>,
 }
@@ -231,16 +231,20 @@ impl Pad {
     /// the first press of the two, or on a code that lands on a spare key.
     pub fn press(&mut self, dir: Dir) -> Option<Item> {
         self.since = 0.0;
-        self.struck = Some(dir);
         match self.arm.take() {
             None => {
+                // No key flash for the opening press: it lights a whole cluster, and the
+                // flash is the landing key's alone — one mark per fact on the screen.
+                self.struck = None;
                 self.arm = Some(dir);
                 self.sounded.push(Note { dir, high: false });
                 None
             }
             Some(arm) => {
+                let code = Code { arm, key: dir };
+                self.struck = Some(code);
                 self.sounded.push(Note { dir, high: true });
-                at(Code { arm, key: dir })
+                at(code)
             }
         }
     }
@@ -255,11 +259,20 @@ impl Pad {
         self.bloom
     }
 
-    /// The last key hit and how lit it still is, 1 at the moment of the press and 0 once
-    /// the flash has died.
-    pub fn flash(&self) -> Option<(Dir, f32)> {
+    /// The key the last code landed on and how lit it still is, 1 at the moment of the
+    /// press and 0 once the flash has died.
+    pub fn flash(&self) -> Option<(Code, f32)> {
         self.struck
-            .map(|d| (d, (1.0 - self.since / FLASH).clamp(0.0, 1.0)))
+            .map(|c| (c, (1.0 - self.since / FLASH).clamp(0.0, 1.0)))
+    }
+
+    /// Shuts the pad and forgets a half-typed code. For the one state the two-press rule
+    /// cannot cover: a pause mid-code would otherwise freeze the open pad behind the menu
+    /// and land the stale arm on the first press after resume.
+    pub fn shut(&mut self) {
+        self.arm = None;
+        self.bloom = 0.0;
+        self.struck = None;
     }
 
     /// Moves the drawing on. The pad is open for exactly as long as a code is half typed,

@@ -32,9 +32,11 @@ the handhelds pull on launch, so a red `main` is a broken game in somebody's han
 
 ## One seam for content
 
-Content is added in `src/registry.rs` and nowhere else — two tables, and a new block or
-craftable is a row in them, read by the hotbar, the rig and the wire alike. A change that
-adds content and has to edit those to be seen has missed the seam. (README, "Adding
+Content is added in `src/registry.rs` — two tables, and a new block or craftable is a row
+in them, read by the pad, the rig and the wire alike. A holdable item also takes its slot
+in `src/code.rs`'s ROSETTE and its picture in `src/glyph.rs`; both are exhaustively
+checked, so leaving one out fails the build rather than hiding the item. Anything past
+those three files edited to make content appear has missed the seam. (README, "Adding
 things".)
 
 ## Show it running

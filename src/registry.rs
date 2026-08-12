@@ -10,15 +10,16 @@
 //! the ones a player can talk about are exactly the ones they can hold.
 //!
 //! The two meet in [`Class::Block`]: an item of that class is a voxel you place, and it
-//! takes its colour from the voxel, so a hotbar cell can never disagree with what it puts
+//! takes its colour from the voxel, so a key's picture can never disagree with what it puts
 //! in the world. Everything else — tools, components, equippables, vehicles — is an item
 //! and nothing more.
 //!
 //! **Adding content is a localised diff.** A new block: a [`Block`] variant, a [`Block::def`]
 //! arm, and — if a player gets to place it — an [`Item`] variant, an [`Item::def`] arm, and
 //! an [`Item::ALL`] entry. A new craftable thing: the item half alone, with a recipe.
-//! Nothing outside this file has to change; the hotbar, the crafting UI and the wire all
-//! read these tables.
+//! The pad, the rig and the wire all read these tables; a holdable item also takes a slot
+//! in [`crate::code`]'s ROSETTE and a picture in [`crate::glyph`], and forgetting either
+//! is a compile error, not a missing thing in somebody's hands.
 
 use serde::{Deserialize, Serialize};
 
@@ -241,7 +242,7 @@ pub enum Class {
     Vehicle { color: [f32; 3] },
 }
 
-/// Everything a player can hold, in hotbar order.
+/// Everything a player can hold, in wire order.
 ///
 /// Wire ids are declaration indices, exactly as for [`Block`] — **append new variants at
 /// the end**, or an older peer decodes a rifle as a hammer. `items_are_declaration_order`
@@ -281,7 +282,7 @@ struct ItemDef {
 const GATHERED: &[(Item, u32)] = &[];
 
 impl Item {
-    /// Every item, in hotbar order. `all_lists_every_item` is what keeps it complete.
+    /// Every item, in wire order. `all_lists_every_item` is what keeps it complete.
     pub const ALL: &'static [Item] = &[
         Item::Grass,
         Item::Dirt,
@@ -407,7 +408,7 @@ impl Item {
                 },
                 recipe: &[(Item::Wood, 2), (Item::Nail, 3)],
             },
-            // Held out, not buckled on: the hotbar cursor is the only equip there is, so
+            // Held out, not buckled on: typing its code is the only equip there is, so
             // opening the canopy is the d-pad and needs no button of its own. Six blocks a
             // second is a walk downwards — slow enough that no drop hurts, which
             // `a_parachute_makes_every_fall_survivable` is what pins.
@@ -482,7 +483,7 @@ impl Item {
             .find(|i| i.places() == Some(block))
     }
 
-    /// Linear RGB: the hotbar cell, and the cube in its owner's hand. A block item is
+    /// Linear RGB: the pad's key, and the cube in its owner's hand. A block item is
     /// drawn in the colour of the block it places, so the two cannot drift.
     pub fn color(self) -> [f32; 3] {
         match self.class() {
@@ -539,7 +540,7 @@ mod tests {
         }
     }
 
-    /// [`Item::ALL`] is the hotbar, the crafting menu, and the array an inventory is —
+    /// [`Item::ALL`] is the array an inventory is and the list every surface draws from —
     /// indexed by [`Item::index`], which is the `as` discriminant. An item missing from
     /// the list is an item nobody can hold; one listed out of order indexes somebody
     /// else's pile.
@@ -576,7 +577,7 @@ mod tests {
         assert_eq!(Item::COUNT, 14, "add the new item to Item::ALL");
     }
 
-    /// A hotbar slot holding a non-solid block would let a player place a hole, or place
+    /// A code landing on a non-solid block would let a player place a hole, or place
     /// nothing at all and wonder why the button is broken.
     #[test]
     fn every_placeable_block_is_solid() {
@@ -664,7 +665,7 @@ mod tests {
             Item::Drill,
             Item::Parachute,
         ] {
-            assert!(Item::ALL.contains(&item), "{item:?} is not in the hotbar");
+            assert!(Item::ALL.contains(&item), "{item:?} is not holdable");
             assert!(!item.recipe().is_empty(), "{item:?} cannot be made");
         }
         assert_eq!(Item::Cushion.places(), Some(Block::Cushion), "placeable");

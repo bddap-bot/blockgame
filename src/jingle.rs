@@ -60,7 +60,7 @@ pub fn tune(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) {
 /// host drains those: a drawing that owned a speaker would be a drawing that could not be
 /// filmed on a machine without one.
 pub fn play(mut commands: Commands, voice: Res<Voice>, mut pad: ResMut<Pad>) {
-    for note in pad.sounded.drain(..).collect::<Vec<_>>() {
+    for note in std::mem::take(&mut pad.sounded) {
         commands.spawn((
             AudioPlayer(voice.note(note.dir, note.high)),
             PlaybackSettings::DESPAWN,

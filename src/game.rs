@@ -304,7 +304,10 @@ pub fn run(start: Start) -> anyhow::Result<()> {
         OnEnter(Phase::World),
         (enter_world, setup, hud::setup, hotbar::setup).chain(),
     )
-    .add_systems(OnEnter(Playing::Paused), pause::open)
+    .add_systems(
+        OnEnter(Playing::Paused),
+        (pause::open, hotbar::rest, hotbar::redraw).chain(),
+    )
     .add_systems(OnExit(Playing::Paused), pause::close)
     .add_systems(
         Update,

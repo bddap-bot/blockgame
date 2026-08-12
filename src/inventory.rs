@@ -277,7 +277,7 @@ mod tests {
     }
 
     /// The same rule as the rifle's, on the way down: a parachute you have not built is a
-    /// hotbar cell you are reading the recipe of, and reading a recipe mid-fall must not
+    /// picture on the pad you are reading the recipe of, and reading a recipe mid-fall must not
     /// break the fall.
     #[test]
     fn pointing_at_a_parachute_is_not_holding_one() {

@@ -6,7 +6,7 @@
 //! screen and expect the next to behave.
 //!
 //! Sized for the Deck's 1280x800 panel held at arm's length: [`ROW_FONT`] is the
-//! smallest text on this screen and it is twice the hotbar's.
+//! smallest text on either menu, and the menus are the only text in the game.
 
 use bevy::prelude::*;
 
@@ -58,7 +58,7 @@ impl Panel {
                     row_gap: Val::Px(12.0),
                     ..default()
                 },
-                // Above the hotbar and the crosshair, which the pause menu covers.
+                // Above the pad and the crosshair, which the pause menu covers.
                 GlobalZIndex(10),
             ))
             .id();

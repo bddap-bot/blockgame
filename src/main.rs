@@ -60,7 +60,7 @@ enum Command {
     Portrait {
         #[arg(long, default_value = "docs/spaceman.png")]
         out: std::path::PathBuf,
-        /// Put something in his hand — an item name, as the hotbar spells it. Empty-handed
+        /// Put something in his hand — an item name, as the registry spells it. Empty-handed
         /// by default, which is what `docs/spaceman.png` shows.
         #[arg(long, value_name = "ITEM")]
         holding: Option<String>,
@@ -89,7 +89,16 @@ fn main() -> Result<()> {
             let holding = holding
                 .map(|name| {
                     registry::Item::named(&name).ok_or_else(|| {
-                        anyhow::anyhow!("no item is called {name:?} — see the hotbar for the names")
+                        // The game shows pictures, not names, so the error is the one
+                        // place a caller can read the spelling from.
+                        anyhow::anyhow!(
+                            "no item is called {name:?} — one of: {}",
+                            registry::Item::ALL
+                                .iter()
+                                .map(|i| i.name())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
                     })
                 })
                 .transpose()?;
