@@ -363,10 +363,14 @@ pub fn run(start: Start) -> anyhow::Result<()> {
     // The pad and the pile it draws belong to no one state: the same two presses pick a
     // thing out in the world and re-centre the rig on it, and the same picture of the pile
     // is under both. Paused is the exception — a d-pad press there is a menu row.
+    //
+    // Ahead of the rig, because the rig hangs whatever the pad is holding: run after it and
+    // a code typed inside the rig would land a frame late, which is a graph that lurches.
     .add_systems(
         Update,
         (fill_the_pocket, hotbar::drum, hotbar::redraw, jingle::play)
             .chain()
+            .before(forge::drive)
             .run_if(in_state(Playing::Live).or(in_state(Playing::Forge))),
     );
 
