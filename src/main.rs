@@ -6,6 +6,7 @@
 //! all a friend somewhere else needs — and the same code runs either way.
 
 mod avatar;
+mod belt;
 mod film;
 mod forge;
 mod game;
@@ -20,6 +21,7 @@ mod player;
 mod portrait;
 mod raycast;
 mod registry;
+mod rig;
 mod ticket;
 mod title;
 mod vehicle;
@@ -69,7 +71,7 @@ enum Command {
     CraftFilm {
         #[arg(long, default_value = "craft-frames")]
         out: std::path::PathBuf,
-        #[arg(long, default_value_t = 268)]
+        #[arg(long, default_value_t = 480)]
         frames: u32,
     },
 }

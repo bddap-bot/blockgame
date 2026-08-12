@@ -27,9 +27,11 @@
 use bevy::prelude::*;
 use std::collections::HashMap;
 
-use crate::avatar::{self, Palette, Part, Skin, part};
-use crate::inventory::Inventory;
-use crate::registry::{Class, Item};
+use crate::avatar::Palette;
+use crate::belt::{self, Belt};
+use crate::inventory::{Held, Inventory};
+use crate::registry::Item;
+use crate::rig::{self, Dir, Kit};
 
 /// Where the rig is built, far above any world: the game's own camera stops at 1200
 /// blocks, so the two scenes cannot see each other and neither needs a render layer to
@@ -43,11 +45,9 @@ const TIER_GAP: f32 = 3.0;
 const COL_GAP: f32 = 2.6;
 const ROW_WIDTH: f32 = 11.5;
 
-/// How many you own before the bar beside a node stops growing. Ten notches is already
-/// taller than the node; past that the number stops being a shape and starts being a
-/// number, which is the thing this mode does not do.
-const BAR_CAP: u32 = 10;
-const BAR_NOTCH: f32 = 0.11;
+/// How big the two arrows under a node are drawn — the code that puts that node in the
+/// middle. Small enough to read as a caption on the thing, big enough to press from.
+const GLYPH: f32 = 0.46;
 
 /// Seconds a craft's flying parts take to reach the thing they were spent on, and how
 /// long the product stays swollen afterwards.
@@ -56,15 +56,15 @@ const POP: f32 = 0.30;
 
 /// What the player is asking of the rig this frame. Filled from the pad in the game and
 /// from a script under `craft-film`, so the rig itself never asks which.
+///
+/// A direction, not a cursor step: this rig is walked by the same two-press code that
+/// takes a thing off the belt, and a d-pad that meant "one cell right" in here and "half a
+/// code" out there would be two alphabets for one thumb.
 #[derive(Resource, Default, Debug, Clone, Copy)]
 pub struct Nav {
-    /// Cursor steps: `+1` right, `-1` left.
-    pub across: i32,
-    /// Cursor steps: `+1` down a tier, `-1` up a tier.
-    pub down: i32,
-    /// Re-centre the rig on whatever the cursor is on.
-    pub focus: bool,
-    /// Make one of whatever the cursor is on.
+    /// A d-pad direction, pressed this frame.
+    pub dir: Option<Dir>,
+    /// Make one of whatever is in the middle.
     pub craft: bool,
     /// Back to the world.
     pub leave: bool,
@@ -115,10 +115,9 @@ pub struct Wire {
 pub struct Graph {
     pub nodes: Vec<Node>,
     pub wires: Vec<Wire>,
-    /// Node indices tier by tier, topmost tier first — the grid the d-pad walks.
-    pub rows: Vec<Vec<usize>>,
-    /// Where in `rows` the focus is.
-    pub focus: (usize, usize),
+    /// What is in the middle. There is no second cursor beside it: a code names a thing,
+    /// and the thing a code names is what the rig is built around.
+    pub focus: Item,
 }
 
 impl Graph {
@@ -174,7 +173,6 @@ impl Graph {
 
         let highest = *tier.values().min().expect("the focus is in the table");
         let lowest = *tier.values().max().expect("the focus is in the table");
-        let mut rows: Vec<Vec<usize>> = Vec::new();
         let mut nodes: Vec<Node> = Vec::new();
         for t in highest..=lowest {
             // Registry order, so the same graph lays out the same way every time it is
@@ -189,20 +187,14 @@ impl Graph {
                 continue;
             }
             let gap = COL_GAP.min(ROW_WIDTH / here.len() as f32);
-            let row = here
-                .iter()
-                .enumerate()
-                .map(|(i, item)| {
-                    let x = (i as f32 - (here.len() as f32 - 1.0) / 2.0) * gap;
-                    nodes.push(Node {
-                        item: *item,
-                        tier: t,
-                        at: Vec3::new(x, -(t as f32) * TIER_GAP, 0.0),
-                    });
-                    nodes.len() - 1
-                })
-                .collect();
-            rows.push(row);
+            for (i, item) in here.iter().enumerate() {
+                let x = (i as f32 - (here.len() as f32 - 1.0) / 2.0) * gap;
+                nodes.push(Node {
+                    item: *item,
+                    tier: t,
+                    at: Vec3::new(x, -(t as f32) * TIER_GAP, 0.0),
+                });
+            }
         }
 
         let index: HashMap<Item, usize> =
@@ -220,55 +212,23 @@ impl Graph {
             }
         }
 
-        let focus_at = rows
-            .iter()
-            .enumerate()
-            .find_map(|(r, row)| {
-                row.iter()
-                    .position(|n| nodes[*n].item == focus)
-                    .map(|c| (r, c))
-            })
-            .expect("the focus is laid out");
-
+        assert!(
+            nodes.iter().any(|n| n.item == focus),
+            "the focus is laid out"
+        );
         Graph {
             nodes,
             wires,
-            rows,
-            focus: focus_at,
+            focus,
         }
     }
 
-    pub fn item_at(&self, cursor: (usize, usize)) -> Item {
-        self.nodes[self.rows[cursor.0][cursor.1]].item
-    }
-
-    fn pos(&self, cursor: (usize, usize)) -> Vec3 {
-        self.nodes[self.rows[cursor.0][cursor.1]].at
-    }
-
-    /// Walks the cursor. Left and right move along a tier; up and down change tier and
-    /// land on whichever node is nearest overhead — the hotbar's own rule, which is the
-    /// only navigation these players already know.
-    pub fn walk(&self, cursor: (usize, usize), across: i32, down: i32) -> (usize, usize) {
-        let (mut row, mut col) = cursor;
-        if across != 0 {
-            let width = self.rows[row].len() as i32;
-            col = (col as i32 + across).rem_euclid(width) as usize;
-        }
-        if down != 0 {
-            let next = row as i32 + down;
-            if (0..self.rows.len() as i32).contains(&next) {
-                let x = self.pos((row, col)).x;
-                row = next as usize;
-                col = (0..self.rows[row].len())
-                    .min_by(|a, b| {
-                        let d = |c: &usize| (self.pos((row, *c)).x - x).abs();
-                        d(a).total_cmp(&d(b))
-                    })
-                    .expect("no tier is empty");
-            }
-        }
-        (row, col)
+    /// Where a node hangs, for anything that has to point at one.
+    fn pos(&self, item: Item) -> Vec3 {
+        self.nodes
+            .iter()
+            .find(|n| n.item == item)
+            .map_or(Vec3::ZERO, |n| n.at)
     }
 
     /// The middle of everything laid out — where the camera points.
@@ -317,162 +277,26 @@ pub fn next_step(stock: &Inventory, want: Item) -> Option<Item> {
 }
 
 // ---------------------------------------------------------------------------
-// The silhouettes — what makes a nail read as a nail with no label under it.
-// ---------------------------------------------------------------------------
-
-/// A blank cube, for anything whose whole identity is its colour: the blocks, which the
-/// player has already been digging up all afternoon and knows on sight.
-const BLOCK: &[Part] = &[part(
-    Skin::Paint(Item::Grass),
-    [1.0, 1.0, 1.0],
-    [0.0, 0.0, 0.0],
-)];
-
-const NAIL: &[Part] = &[
-    part(Skin::Paint(Item::Nail), [0.5, 0.13, 0.5], [0.0, 0.44, 0.0]),
-    part(Skin::Paint(Item::Nail), [0.16, 0.7, 0.16], [0.0, 0.04, 0.0]),
-    part(
-        Skin::Paint(Item::Nail),
-        [0.07, 0.2, 0.07],
-        [0.0, -0.38, 0.0],
-    ),
-];
-
-const HAMMER: &[Part] = &[
-    part(
-        Skin::Paint(Item::Hammer),
-        [0.17, 0.95, 0.17],
-        [0.0, -0.13, 0.0],
-    ),
-    part(Skin::Gear, [0.78, 0.28, 0.30], [0.0, 0.42, 0.0]),
-    part(Skin::Gear, [0.22, 0.20, 0.34], [-0.44, 0.30, 0.0]),
-];
-
-const DRILL: &[Part] = &[
-    part(
-        Skin::Paint(Item::Drill),
-        [0.56, 0.52, 0.44],
-        [0.0, 0.28, 0.0],
-    ),
-    part(
-        Skin::Paint(Item::Drill),
-        [0.20, 0.30, 0.20],
-        [0.0, 0.62, 0.0],
-    ),
-    part(Skin::Gear, [0.30, 0.26, 0.26], [0.0, -0.06, 0.0]),
-    part(Skin::Gear, [0.19, 0.24, 0.19], [0.0, -0.28, 0.0]),
-    part(Skin::Dark, [0.10, 0.22, 0.10], [0.0, -0.48, 0.0]),
-];
-
-const HANDGUN: &[Part] = &[
-    part(
-        Skin::Paint(Item::Handgun),
-        [0.92, 0.22, 0.16],
-        [0.06, 0.24, 0.0],
-    ),
-    part(
-        Skin::Paint(Item::Handgun),
-        [0.24, 0.52, 0.16],
-        [-0.26, -0.16, 0.0],
-    ),
-    part(Skin::Gear, [0.14, 0.12, 0.10], [-0.05, 0.06, 0.0]),
-];
-
-const RIFLE: &[Part] = &[
-    part(
-        Skin::Paint(Item::Rifle),
-        [1.30, 0.14, 0.13],
-        [0.10, 0.12, 0.0],
-    ),
-    part(
-        Skin::Paint(Item::Rifle),
-        [0.40, 0.30, 0.15],
-        [-0.48, -0.04, 0.0],
-    ),
-    part(
-        Skin::Paint(Item::Rifle),
-        [0.20, 0.34, 0.14],
-        [-0.16, -0.18, 0.0],
-    ),
-    part(Skin::Dark, [0.34, 0.11, 0.11], [0.16, 0.28, 0.0]),
-    part(Skin::Gear, [0.08, 0.10, 0.08], [0.30, 0.30, 0.0]),
-];
-
-const PARACHUTE: &[Part] = &[
-    part(
-        Skin::Paint(Item::Parachute),
-        [0.92, 0.20, 0.50],
-        [0.0, 0.40, 0.0],
-    ),
-    part(
-        Skin::Paint(Item::Parachute),
-        [0.60, 0.18, 0.40],
-        [0.0, 0.56, 0.0],
-    ),
-    part(
-        Skin::Paint(Item::Parachute),
-        [0.24, 0.14, 0.28],
-        [0.0, 0.68, 0.0],
-    ),
-    part(Skin::Dark, [0.04, 0.52, 0.04], [-0.36, 0.02, 0.0]),
-    part(Skin::Dark, [0.04, 0.52, 0.04], [0.36, 0.02, 0.0]),
-    part(Skin::Gear, [0.32, 0.24, 0.24], [0.0, -0.34, 0.0]),
-];
-
-/// What one item looks like on the rig, and how big to draw the table.
-///
-/// The car is the game's own car — the one the player drives — shrunk onto a shelf,
-/// because the strongest possible label for "this makes a car" is a car.
-fn icon(item: Item) -> (&'static [Part], f32, f32) {
-    match item.class() {
-        Class::Block(_) => (BLOCK, 1.0, 0.0),
-        Class::Component { .. } => (NAIL, 1.0, 0.0),
-        Class::Equippable { .. } => (PARACHUTE, 1.0, 0.0),
-        // Every part table is written about its own feet, and the car's is the game's:
-        // it is lifted by half its height so it hangs on the string like everything else.
-        Class::Vehicle { .. } => (avatar::CAR, 0.54, -0.42),
-        Class::Tool { .. } => match item {
-            Item::Drill => (DRILL, 1.0, 0.0),
-            Item::Handgun => (HANDGUN, 1.0, 0.0),
-            Item::Rifle => (RIFLE, 1.0, 0.0),
-            _ => (HAMMER, 1.0, 0.0),
-        },
-    }
-}
-
-/// The silhouette tables are written for one item each, so the colour in them is that
-/// item's. Re-skinning them per node is what lets one table draw every block.
-fn repaint(p: &Part, as_item: Item) -> Part {
-    Part {
-        skin: match p.skin {
-            Skin::Paint(_) => Skin::Paint(as_item),
-            other => other,
-        },
-        size: p.size,
-        at: p.at,
-    }
-}
-
-// ---------------------------------------------------------------------------
 // The rig — components, and the systems that build and animate it.
 // ---------------------------------------------------------------------------
 
 /// Everything the rig owns, so leaving is one despawn.
-#[derive(Component)]
+#[derive(Component, Clone, Copy)]
 pub struct Rig;
 
 /// The part of the rig that is a picture of *this* graph — everything but the camera, the
 /// lamp, and the parts currently in flight. Re-centring throws exactly these away and
 /// builds them again, which is why it is a marker and not a list of `Without`s that has to
 /// be extended every time the rig grows a new kind of thing.
-#[derive(Component)]
+#[derive(Component, Clone, Copy)]
 pub struct Built;
 
-/// The rig's state between frames: what is in the middle, and where the cursor is.
+/// The rig's state between frames: what is in the middle, and nothing else. There is no
+/// cursor to keep — the code names a thing and the thing it names is the middle, so
+/// "where am I" and "what am I looking at" cannot disagree.
 #[derive(Resource)]
 pub struct Forge {
     pub graph: Graph,
-    pub cursor: (usize, usize),
     /// The pile as of the last frame, so a count that went up can be spotted and cheered.
     seen: Inventory,
     /// Rebuilt geometry is wanted next frame — set when the focus moves.
@@ -481,23 +305,19 @@ pub struct Forge {
 
 impl Forge {
     pub fn new(focus: Item, seen: Inventory) -> Forge {
-        let graph = Graph::around(focus);
-        let cursor = graph.focus;
         Forge {
-            graph,
-            cursor,
+            graph: Graph::around(focus),
             seen,
             dirty: true,
         }
     }
 
-    pub fn cursor_item(&self) -> Item {
-        self.graph.item_at(self.cursor)
+    pub fn middle(&self) -> Item {
+        self.graph.focus
     }
 
     fn refocus(&mut self, item: Item) {
         self.graph = Graph::around(item);
-        self.cursor = self.graph.focus;
         self.dirty = true;
     }
 }
@@ -522,15 +342,7 @@ pub struct Bead {
     dark: Handle<StandardMaterial>,
 }
 
-/// The notch bar beside a node: one notch lit per one owned.
-#[derive(Component)]
-pub struct Notch {
-    item: Item,
-    nth: u32,
-    lit: Handle<StandardMaterial>,
-}
-
-/// The ring the cursor wears.
+/// The ring around whatever is in the middle.
 #[derive(Component)]
 pub struct Cursor;
 
@@ -546,76 +358,17 @@ pub struct InFlight {
 #[derive(Component)]
 pub struct Eye;
 
-/// Meshes and paints the rig reuses. Built once, on the way in.
-#[derive(Resource)]
-pub struct Kit {
-    palette: Palette,
-    cube: Handle<Mesh>,
-    ring: Handle<Mesh>,
-    bead: Handle<Mesh>,
-    /// Per item: the bright paint a lit bead or notch wears.
-    lit: [Handle<StandardMaterial>; Item::COUNT],
-    dark: Handle<StandardMaterial>,
-    string: Handle<StandardMaterial>,
-    ready: Handle<StandardMaterial>,
-    waiting: Handle<StandardMaterial>,
-    backdrop: Handle<StandardMaterial>,
-}
-
-pub fn enter(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    forge: Res<Forge>,
-) {
-    let palette = Palette::new(&mut meshes, &mut materials);
-    fn glow(
-        materials: &mut Assets<StandardMaterial>,
-        c: Color,
-        strength: f32,
-    ) -> Handle<StandardMaterial> {
-        materials.add(StandardMaterial {
-            base_color: c,
-            emissive: LinearRgba::from(c) * strength,
-            perceptual_roughness: 0.4,
-            ..default()
-        })
-    }
-    let lit = std::array::from_fn(|i| {
-        let [r, g, b] = Item::ALL[i].color();
-        glow(&mut materials, Color::linear_rgb(r, g, b), 3.0)
-    });
-    let kit = Kit {
-        cube: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
-        ring: meshes.add(Torus::new(0.86, 0.95)),
-        bead: meshes.add(Sphere::new(0.5)),
-        lit,
-        dark: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.10, 0.11, 0.14),
-            perceptual_roughness: 0.9,
-            ..default()
-        }),
-        string: glow(&mut materials, Color::srgb(0.26, 0.32, 0.42), 0.6),
-        ready: glow(&mut materials, Color::srgb(0.45, 1.0, 0.5), 4.0),
-        waiting: glow(&mut materials, Color::srgb(1.0, 0.72, 0.28), 2.0),
-        backdrop: materials.add(StandardMaterial {
-            base_color: Color::srgba(0.02, 0.03, 0.06, 0.86),
-            alpha_mode: AlphaMode::Blend,
-            unlit: true,
-            ..default()
-        }),
-        palette,
-    };
-
+pub fn enter(mut commands: Commands, forge: Res<Forge>) {
     // The rig's own camera, drawn over the world without wiping it: the graph hangs in
     // the air in front of wherever the player was standing, which is the point of
-    // building it out of blocks rather than out of panels.
+    // building it out of blocks rather than out of panels. Above the belt's camera, which
+    // is switched off while this one is up — one room at a time.
     commands.spawn((
         Rig,
         Eye,
         Camera3d::default(),
         Camera {
-            order: 1,
+            order: 2,
             clear_color: ClearColorConfig::None,
             ..default()
         },
@@ -646,38 +399,41 @@ pub fn enter(
         },
         Transform::from_translation(ORIGIN + Vec3::new(-6.0, 7.0, 12.0)),
     ));
-
-    commands.insert_resource(kit);
 }
 
 pub fn leave(mut commands: Commands, rig: Query<Entity, With<Rig>>) {
     for e in rig {
         commands.entity(e).despawn();
     }
-    commands.remove_resource::<Kit>();
     commands.remove_resource::<Forge>();
 }
 
-/// Reads the pad: walks the cursor, re-centres the rig, asks for crafts.
+/// Reads the pad: re-centres the rig on whatever the code named, and asks for crafts.
+///
+/// A code pressed in here changes what is in your hand as well as what is in the middle,
+/// because it is the same press meaning the same thing — you walk out of the rig holding
+/// the last thing you looked at, which is nearly always the thing you came in to make.
 pub fn drive(
     nav: Res<Nav>,
     stock: Res<Stock>,
+    mut belt: ResMut<Belt>,
+    mut held: ResMut<Held>,
     mut forge: ResMut<Forge>,
     mut requests: ResMut<CraftRequests>,
 ) {
-    if nav.across != 0 || nav.down != 0 {
-        forge.cursor = forge.graph.walk(forge.cursor, nav.across, nav.down);
-    }
-    if nav.focus {
-        let item = forge.cursor_item();
-        if item != forge.graph.item_at(forge.graph.focus) {
-            forge.refocus(item);
-        }
+    // The same two presses that take a thing off the belt, aimed at this room instead: a
+    // completed code is put in the middle, and its whole neighbourhood unfolds around it.
+    // Anything in the game is two presses away from here — including the things this graph
+    // is not currently drawing.
+    if let Some(item) = belt::press(nav.dir, &mut belt, &mut held)
+        && item != forge.middle()
+    {
+        forge.refocus(item);
     }
     if nav.craft {
-        // The deepest thing that is actually makeable, not the thing pointed at: a child
-        // holding the button on a car makes the nails first and sees each one appear.
-        if let Some(step) = next_step(&stock.0, forge.cursor_item()) {
+        // The deepest thing that is actually makeable, not the thing in the middle: a
+        // child holding the button on a car makes the nails first and sees each appear.
+        if let Some(step) = next_step(&stock.0, forge.middle()) {
             requests.0.push(step);
         }
     }
@@ -688,6 +444,7 @@ pub fn rebuild(
     mut commands: Commands,
     mut forge: ResMut<Forge>,
     kit: Res<Kit>,
+    palette: Res<Palette>,
     built: Query<Entity, With<Built>>,
 ) {
     if !forge.dirty {
@@ -699,7 +456,7 @@ pub fn rebuild(
     }
 
     let graph = &forge.graph;
-    let middle = graph.item_at(graph.focus);
+    let middle = graph.focus;
     let centre = graph.centre();
     let reach = graph.framing();
 
@@ -707,8 +464,8 @@ pub fn rebuild(
     commands.spawn((
         Rig,
         Built,
-        Mesh3d(kit.cube.clone()),
-        MeshMaterial3d(kit.backdrop.clone()),
+        Mesh3d(kit.cube()),
+        MeshMaterial3d(kit.backdrop()),
         Transform::from_translation(ORIGIN + centre + Vec3::new(0.0, 0.0, -3.0))
             .with_scale(Vec3::new(reach * 4.0, reach * 4.0, 0.1)),
     ));
@@ -719,8 +476,8 @@ pub fn rebuild(
         commands.spawn((
             Rig,
             Built,
-            Mesh3d(kit.cube.clone()),
-            MeshMaterial3d(kit.string.clone()),
+            Mesh3d(kit.cube()),
+            MeshMaterial3d(kit.string()),
             Transform::from_translation(ORIGIN + (from + to) / 2.0)
                 .looking_at(ORIGIN + to, Vec3::Y)
                 .with_scale(Vec3::new(0.045, 0.045, along.length())),
@@ -741,11 +498,11 @@ pub fn rebuild(
                     part,
                     nth,
                     along: along_frac,
-                    lit: kit.lit[part.index()].clone(),
-                    dark: kit.dark.clone(),
+                    lit: kit.lit(part),
+                    dark: kit.dark(),
                 },
-                Mesh3d(kit.bead.clone()),
-                MeshMaterial3d(kit.dark.clone()),
+                Mesh3d(kit.bead()),
+                MeshMaterial3d(kit.dark()),
                 Transform::from_translation(ORIGIN + from.lerp(to, along_frac))
                     .with_scale(Vec3::splat(0.26)),
             ));
@@ -754,9 +511,12 @@ pub fn rebuild(
 
     for node in &graph.nodes {
         let scale = if node.item == middle { 1.25 } else { 0.92 };
-        let (parts, model_scale, lift) = icon(node.item);
-        let body = commands
-            .spawn((
+        let body = rig::silhouette(
+            &mut commands,
+            &palette,
+            node.item,
+            ORIGIN + node.at,
+            (
                 Rig,
                 Built,
                 NodeView {
@@ -764,52 +524,41 @@ pub fn rebuild(
                     at: node.at,
                     pop: 0.0,
                 },
-                Transform::from_translation(ORIGIN + node.at).with_scale(Vec3::splat(scale)),
-                Visibility::Visible,
-            ))
-            .id();
-        commands.entity(body).with_children(|model| {
-            for p in parts {
-                let p = repaint(p, node.item);
-                model.spawn((
-                    Mesh3d(kit.palette.cube()),
-                    MeshMaterial3d(kit.palette.paint(p.skin)),
-                    Transform {
-                        translation: Vec3::from(p.at) * model_scale + Vec3::new(0.0, lift, 0.0),
-                        scale: Vec3::from(p.size) * model_scale,
-                        ..default()
-                    },
-                ));
-            }
-        });
+            ),
+        );
+        commands
+            .entity(body)
+            .insert(Transform::from_translation(ORIGIN + node.at).with_scale(Vec3::splat(scale)));
 
         // The notch bar: how many of this you own, as a height rather than a number.
-        for nth in 0..BAR_CAP {
-            commands.spawn((
-                Rig,
-                Built,
-                Notch {
-                    item: node.item,
-                    nth,
-                    lit: kit.lit[node.item.index()].clone(),
-                },
-                Mesh3d(kit.cube.clone()),
-                MeshMaterial3d(kit.dark.clone()),
-                Transform::from_translation(
-                    ORIGIN + node.at + Vec3::new(0.86, -0.62 + nth as f32 * BAR_NOTCH, 0.0),
-                )
-                .with_scale(Vec3::new(0.20, BAR_NOTCH * 0.72, 0.20)),
-            ));
-        }
+        rig::notch_bar(
+            &mut commands,
+            &kit,
+            node.item,
+            ORIGIN + node.at,
+            (Rig, Built),
+        );
+
+        // And under it, the two presses that put it in the middle. The same arrowheads the
+        // belt hangs on its strings, so a child learns the whole alphabet in whichever
+        // room they happen to be standing in.
+        rig::code_glyph(
+            &mut commands,
+            &kit,
+            node.item,
+            ORIGIN + node.at + Vec3::new(0.0, -0.92, 0.0),
+            GLYPH,
+            (Rig, Built),
+        );
     }
 
     commands.spawn((
         Rig,
         Built,
         Cursor,
-        Mesh3d(kit.ring.clone()),
-        MeshMaterial3d(kit.waiting.clone()),
-        Transform::from_translation(ORIGIN + graph.pos(forge.cursor))
+        Mesh3d(kit.ring()),
+        MeshMaterial3d(kit.waiting()),
+        Transform::from_translation(ORIGIN + graph.pos(middle))
             .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
     ));
 }
@@ -844,21 +593,6 @@ pub fn beads(
     }
 }
 
-/// The bar beside each node: one notch lit per one owned.
-pub fn notches(
-    stock: Res<Stock>,
-    kit: Res<Kit>,
-    mut notches: Query<(&Notch, &mut MeshMaterial3d<StandardMaterial>)>,
-) {
-    for (notch, mut paint) in &mut notches {
-        let lit = stock.0.count(notch.item).min(BAR_CAP) > notch.nth;
-        let want = if lit { &notch.lit } else { &kit.dark };
-        if paint.0 != *want {
-            paint.0 = want.clone();
-        }
-    }
-}
-
 /// The things themselves: turning slowly, and swelling for a moment when one is made.
 ///
 /// The turn is not decoration. Every model in this game is a table of boxes, and a table
@@ -870,7 +604,7 @@ pub fn nodes(
     mut nodes: Query<(&mut NodeView, &mut Transform)>,
 ) {
     let (dt, clock) = (time.delta_secs(), time.elapsed_secs());
-    let middle = forge.graph.item_at(forge.graph.focus);
+    let middle = forge.graph.focus;
     for (mut view, mut at) in &mut nodes {
         view.pop = (view.pop - dt).max(0.0);
         let base = if view.item == middle { 1.25 } else { 0.92 };
@@ -879,7 +613,7 @@ pub fn nodes(
     }
 }
 
-/// The ring the cursor wears: green when the button in their hand would make one right
+/// The ring around the middle: green when the button in their hand would make one right
 /// now, amber when something under it still has to be dug up or built.
 pub fn cursor(
     time: Res<Time>,
@@ -892,23 +626,18 @@ pub fn cursor(
     let Ok((mut at, mut paint)) = ring.single_mut() else {
         return;
     };
-    let graph = &forge.graph;
+    let middle = forge.graph.focus;
     at.translation = at
         .translation
-        .lerp(ORIGIN + graph.pos(forge.cursor), (dt * 14.0).min(1.0));
-    let size = if forge.cursor == graph.focus {
-        1.42
+        .lerp(ORIGIN + forge.graph.pos(middle), (dt * 14.0).min(1.0));
+    at.scale = Vec3::splat(1.42 * (1.0 + 0.06 * (clock * 5.0).sin()));
+    let want = if stock.0.can_craft(middle) {
+        kit.ready()
     } else {
-        1.12
+        kit.waiting()
     };
-    at.scale = Vec3::splat(size * (1.0 + 0.06 * (clock * 5.0).sin()));
-    let want = if stock.0.can_craft(graph.item_at(forge.cursor)) {
-        &kit.ready
-    } else {
-        &kit.waiting
-    };
-    if paint.0 != *want {
-        paint.0 = want.clone();
+    if paint.0 != want {
+        paint.0 = want;
     }
 }
 
@@ -994,8 +723,8 @@ pub fn react(
                         // blob: the count is still visible while it is being spent.
                         left: FLIGHT + i as f32 * 0.05,
                     },
-                    Mesh3d(kit.bead.clone()),
-                    MeshMaterial3d(kit.lit[ingredient.index()].clone()),
+                    Mesh3d(kit.bead()),
+                    MeshMaterial3d(kit.lit(*ingredient)),
                     Transform::from_translation(ORIGIN + from.at).with_scale(Vec3::splat(0.34)),
                 ));
             }
@@ -1072,7 +801,7 @@ mod tests {
         for wanted in [Item::Car, Item::Wood, Item::Stone, Item::Nail] {
             assert!(items.contains(&wanted), "{wanted:?} is missing");
         }
-        assert_eq!(g.nodes[g.rows[g.focus.0][g.focus.1]].item, Item::Car);
+        assert_eq!(g.focus, Item::Car);
     }
 
     /// The way up is drawn too, which is the half a tree view does not have: a nail is
@@ -1100,16 +829,21 @@ mod tests {
         }
     }
 
-    /// The d-pad's rules: left and right stay on a tier and wrap, up and down change tier
-    /// and land nearest overhead. A cursor that could leave the grid would be a rig with
-    /// no way back.
+    /// The d-pad's rule in here is the belt's rule: two presses name a thing, and the thing
+    /// named goes in the middle — whether or not the graph on screen was drawing it. There
+    /// is no grid to fall off, which is the point of having deleted the cursor.
     #[test]
-    fn the_cursor_stays_on_the_grid() {
-        let g = Graph::around(Item::Car);
-        let mut at = g.focus;
-        for step in [(1, 0), (1, 0), (0, 1), (-1, 0), (0, -1), (0, -1), (0, -1)] {
-            at = g.walk(at, step.0, step.1);
-            assert!(at.0 < g.rows.len() && at.1 < g.rows[at.0].len(), "{at:?}");
+    fn a_code_puts_anything_in_the_middle() {
+        let mut forge = Forge::new(Item::Car, Inventory::default());
+        let mut belt = Belt::default();
+        let mut held = Held(Item::Car);
+        for want in [Item::Parachute, Item::Sand, Item::Nail, Item::Car] {
+            let [first, second] = crate::rig::code(want);
+            assert_eq!(belt::press(Some(first), &mut belt, &mut held), None);
+            assert_eq!(belt::press(Some(second), &mut belt, &mut held), Some(want));
+            forge.refocus(want);
+            assert_eq!(forge.middle(), want);
+            assert!(forge.graph.nodes.iter().any(|n| n.item == want));
         }
     }
 

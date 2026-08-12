@@ -13,6 +13,7 @@ use bevy::window::{CursorGrabMode, CursorOptions, MonitorSelection, PrimaryWindo
 use std::collections::{HashMap, HashSet};
 
 use crate::avatar;
+use crate::belt::{self, Belt};
 use crate::forge;
 use crate::hud;
 use crate::input::{
@@ -26,6 +27,7 @@ use crate::pause;
 use crate::player::{self, Player};
 use crate::raycast;
 use crate::registry::{Block, Class, Item, Use};
+use crate::rig;
 use crate::ticket::Share;
 use crate::title::{self, Booted, Phase, Playing, Start};
 use crate::vehicle::{self, Ride};
@@ -252,6 +254,7 @@ pub fn run(start: Start) -> anyhow::Result<()> {
     .init_resource::<forge::Nav>()
     .init_resource::<forge::Stock>()
     .init_resource::<forge::CraftRequests>()
+    .init_resource::<Belt>()
     .init_resource::<Held>()
     .init_resource::<Chunks>()
     .init_resource::<Digging>()
@@ -294,7 +297,7 @@ pub fn run(start: Start) -> anyhow::Result<()> {
     )
     .add_systems(
         OnEnter(Phase::World),
-        (enter_world, setup, hud::setup).chain(),
+        (enter_world, rig::setup, setup, hud::setup, belt::enter).chain(),
     )
     .add_systems(OnEnter(Playing::Paused), pause::open)
     .add_systems(OnExit(Playing::Paused), pause::close)
@@ -304,7 +307,10 @@ pub fn run(start: Start) -> anyhow::Result<()> {
             .chain()
             .run_if(in_state(Playing::Paused)),
     )
-    .add_systems(OnEnter(Playing::Forge), (forge::enter, let_go_of_the_mouse))
+    .add_systems(
+        OnEnter(Playing::Forge),
+        (forge::enter, shut_the_belt_camera, let_go_of_the_mouse),
+    )
     .add_systems(OnExit(Playing::Forge), undress_the_forge)
     .add_systems(
         // The same order every frame the rig is up: read the pad, take the pile as it
@@ -317,7 +323,7 @@ pub fn run(start: Start) -> anyhow::Result<()> {
             forge::rebuild,
             forge::react,
             forge::beads,
-            forge::notches,
+            rig::notches,
             forge::nodes,
             forge::cursor,
             forge::flight,
@@ -326,6 +332,23 @@ pub fn run(start: Start) -> anyhow::Result<()> {
         )
             .chain()
             .run_if(in_state(Playing::Forge)),
+    )
+    // The belt is drawn whatever the player is doing in the world — walking, flying,
+    // driving — because what is in your hand is a thing you keep looking at. It stops at
+    // the door of the recipe rig, which is a room of its own.
+    .add_systems(
+        Update,
+        (
+            wear_the_belt,
+            belt::dress,
+            belt::stations,
+            belt::spin,
+            belt::legs,
+            rig::notches,
+            belt::eye,
+        )
+            .chain()
+            .run_if(in_state(Playing::Live).or(in_state(Playing::Paused))),
     )
     .add_systems(
         Update,
@@ -346,7 +369,6 @@ pub fn run(start: Start) -> anyhow::Result<()> {
             stream_chunks,
             remesh_dirty,
             net_send_pose,
-            hud::update_hotbar,
             hud::fade_notice,
             open_pause_menu.run_if(in_state(Playing::Live)),
         )
@@ -484,6 +506,7 @@ fn apply_intent(
     inventories: Res<Inventories>,
     session: NonSend<Session>,
     mut me: ResMut<Me>,
+    mut belt: ResMut<Belt>,
     mut held: ResMut<Held>,
     mut camera: Query<&mut Transform, With<Camera3d>>,
 ) {
@@ -507,19 +530,19 @@ fn apply_intent(
         p.yaw = driven.yaw;
         p.pos = driven.seat();
         p.ride = Ride::Driving(driven);
-        pick_item(&intent, &mut held);
+        pick_item(&intent, &mut belt, &mut held);
         aim_camera(p, &mut camera);
         return;
     }
 
     p.yaw += intent.look.x;
 
-    // How the thing in hand falls: a parachute is the hotbar cell you are on, exactly as a
-    // drill is, so opening the canopy is the d-pad and needs no button of its own.
+    // How the thing in hand falls: a parachute is whatever code you last pressed, exactly
+    // as a drill is, so opening the canopy is the d-pad and needs no button of its own.
     let fall = inventories.of(session.me()).falling(held.0);
     player::advance(&sim.0, p, &intent, fall, dt);
 
-    pick_item(&intent, &mut held);
+    pick_item(&intent, &mut belt, &mut held);
     aim_camera(p, &mut camera);
 }
 
@@ -540,16 +563,10 @@ fn mind_the_body(me: Res<Me>, mut intent: ResMut<Intent>) {
     }
 }
 
-/// Moves the hotbar cursor. The number row reaches the first nine cells; stepping reaches
-/// every cell. A key pointed past the end of the hotbar does nothing rather than wrapping
-/// round to something the player was not aiming at.
-fn pick_item(intent: &Intent, held: &mut Held) {
-    if let Some(cell) = intent.item_pick.and_then(|slot| Item::ALL.get(slot)) {
-        held.0 = *cell;
-    }
-    if intent.item_delta != 0 {
-        held.0 = held.0.step(intent.item_delta);
-    }
+/// Spells a code, and hands over whatever it names. Two presses of the d-pad reach any of
+/// the fourteen things there are, from anywhere, without a cursor to keep track of.
+fn pick_item(intent: &Intent, belt: &mut Belt, held: &mut Held) {
+    belt::press(intent.dir, belt, held);
 }
 
 /// Puts the camera in the player's head. The one place it is moved, so a driver's view and
@@ -1018,18 +1035,41 @@ fn open_forge(
     playing.set(Playing::Forge);
 }
 
-/// Hands the rig the pile it draws, and hides the words while it is up.
+/// Hands the recipe rig the pile it draws, and hides the crosshair while it is up.
 fn dress_the_forge(
     session: NonSend<Session>,
     inventories: Res<Inventories>,
     mut stock: ResMut<forge::Stock>,
     mut hud: Query<&mut Visibility, With<hud::HudRoot>>,
 ) {
-    let mine = inventories.of(session.me());
-    if stock.0 != *mine {
-        stock.0 = mine.clone();
-    }
+    belt::wear_the_stock(inventories.of(session.me()), &mut stock);
     hud::show(&mut hud, false);
+}
+
+/// The same pile, handed to the belt. One [`forge::Stock`] feeds both rigs, so what your
+/// body is wearing and what the graph is counting cannot come apart.
+fn wear_the_belt(
+    session: NonSend<Session>,
+    inventories: Res<Inventories>,
+    mut stock: ResMut<forge::Stock>,
+) {
+    belt::wear_the_stock(inventories.of(session.me()), &mut stock);
+}
+
+/// One room at a time: the belt's camera is switched off while the recipe rig is up and
+/// back on when it folds away. Switched rather than despawned — the belt is a fixed set of
+/// geometry that lives as long as the world does, and rebuilding it on every visit to the
+/// forge would be a rig that pops back into existence a frame late.
+fn shut_the_belt_camera(mut cameras: Query<&mut Camera, With<belt::Rig>>) {
+    for mut camera in &mut cameras {
+        camera.is_active = false;
+    }
+}
+
+fn open_the_belt_camera(mut cameras: Query<&mut Camera, With<belt::Rig>>) {
+    for mut camera in &mut cameras {
+        camera.is_active = true;
+    }
 }
 
 /// Puts the rig's craft requests through the same door the hotbar's used: the host pays
@@ -1054,14 +1094,16 @@ fn close_forge(nav: Res<forge::Nav>, mut playing: ResMut<NextState<Playing>>) {
     }
 }
 
-/// Back to the world: the rig goes away and the words come back.
+/// Back to the world: the recipe rig goes away, the crosshair and the belt come back.
 fn undress_the_forge(
     mut commands: Commands,
     rig: Query<Entity, With<forge::Rig>>,
+    belt_cameras: Query<&mut Camera, With<belt::Rig>>,
     mut hud: Query<&mut Visibility, With<hud::HudRoot>>,
     mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
     forge::leave(commands.reborrow(), rig);
+    open_the_belt_camera(belt_cameras);
     hud::show(&mut hud, true);
     grab_mouse(&mut cursor, true);
 }

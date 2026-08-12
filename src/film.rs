@@ -1,14 +1,16 @@
-//! `blockgame craft-film` — drives the crafting rig through a scripted session and saves
-//! every frame.
+//! `blockgame craft-film` — drives the belt and the recipe rig through a scripted session
+//! and saves every frame.
 //!
-//! The rig is a thing that *moves*: beads light one at a time, parts fly up their strings,
-//! a graph re-centres. A still picture of it is a picture of none of that, and a paragraph
-//! about it is exactly the text the mode exists to avoid. So the way a change to
-//! [`crate::forge`] is reviewed is by watching it, and this is what makes the film.
+//! Both rigs are things that *move*: a body blooms into a constellation of everything you
+//! own, beads light one at a time, parts fly up their strings, a graph re-centres. A still
+//! picture of that is a picture of none of it, and a paragraph about it is exactly the text
+//! these modes exist to avoid. So the way a change to [`crate::belt`] or [`crate::forge`]
+//! is reviewed is by watching it, and this is what makes the film.
 //!
-//! It presses the same [`forge::Nav`] the pad fills and runs the same systems the game
-//! runs, so what comes out is the prototype and not a mock-up of it. What it stands in for
-//! is the host: crafts are paid straight out of the film's own pile.
+//! It presses the same d-pad the player does — one [`Dir`] a frame, through the same
+//! [`belt::press`] and the same [`forge::Nav`] — and runs the same systems the game runs,
+//! so what comes out is the prototype and not a mock-up of it. What it stands in for is the
+//! host: crafts are paid straight out of the film's own pile.
 //!
 //! On a box with no display: `xvfb-run -s '-screen 0 1024x640x24' blockgame craft-film`.
 
@@ -19,9 +21,11 @@ use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy::time::TimeUpdateStrategy;
 
+use crate::belt::{self, Belt};
 use crate::forge;
-use crate::inventory::Inventory;
+use crate::inventory::{Held, Inventory};
 use crate::registry::{Block, Item};
+use crate::rig::{self, Dir};
 
 /// Frames a second the film is shot and played at. Fixed rather than measured, so a frame
 /// that took a software rasteriser half a second still advances the animation by one
@@ -33,9 +37,20 @@ const FPS: u32 = 24;
 const TAIL: u32 = 12;
 
 /// Frames run before the first one is kept. A bevy app's first frames have a half-built
-/// render graph, and the rig's camera is the *second* one in this app — early on it draws
-/// nothing at all, which reads as a bug in the rig rather than as the warm-up it is.
+/// render graph, and the rigs' cameras are the *second* and third in this app — early on
+/// they draw nothing at all, which reads as a bug in the rig rather than as the warm-up it
+/// is.
 const SETTLE: u32 = 10;
+
+/// Which room the film is in. The same two the game has, entered the same way — the belt
+/// is where you choose a thing, and pressing craft on it takes you to what that thing is
+/// made of.
+#[derive(States, Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Stage {
+    #[default]
+    Belt,
+    Forge,
+}
 
 #[derive(Resource)]
 struct Film {
@@ -44,34 +59,52 @@ struct Film {
     last: u32,
 }
 
-/// One scripted press, and the frame it happens on.
-struct Beat(u32, fn(&mut forge::Nav));
+/// One scripted press. There is no third kind: everything either spells a code, makes a
+/// thing, or leaves the room.
+#[derive(Clone, Copy)]
+enum Press {
+    Pad(Dir),
+    Craft,
+    Leave,
+}
+
+/// One press, and the frame it happens on.
+struct Beat(u32, Press);
 
 /// The session the film shows, in the order a child would do it.
 ///
-/// It is written as presses rather than as outcomes on purpose: if a change to the rig
+/// It is written as presses rather than as outcomes on purpose: if a change to either rig
 /// breaks the navigation, this script walks into a wall and the film shows it, where a
-/// script that set the cursor directly would keep looking correct.
+/// script that set the held item directly would keep looking correct.
 fn script() -> Vec<Beat> {
     let mut beats = vec![
-        // Down onto the row of parts, then across to the nails.
-        Beat(34, |n| n.down = 1),
-        Beat(52, |n| n.across = 1),
+        // Open the belt and take a nail off it — right shoulder, then left. The cluster
+        // blooms on the first press and the second one hands it over.
+        Beat(22, Press::Pad(Dir::Right)),
+        Beat(48, Press::Pad(Dir::Left)),
+        // And now the car, which is two presses from anywhere: left shoulder, then right.
+        Beat(80, Press::Pad(Dir::Left)),
+        Beat(104, Press::Pad(Dir::Right)),
+        // Craft on the car is the way *into* the recipe rig, on the thing in your hand.
+        Beat(132, Press::Craft),
     ];
     // Eight presses of the craft button, one nail each: the bead row on the string up to
     // the car lights one bead at a time, which is the whole idea in eight seconds.
     for i in 0..8 {
-        beats.push(Beat(70 + i * 11, |n| n.craft = true));
+        beats.push(Beat(176 + i * 11, Press::Craft));
     }
     beats.extend([
-        // Back up to the car, whose ring has just gone green, and build it.
-        Beat(172, |n| n.down = -1),
-        Beat(190, |n| n.craft = true),
-        // Then down into the parts and re-centre there: the whole tree the wood is in
-        // sprouts at once, six products across the top on crossing strings, which is what
-        // a graph looks like when you stand at the bottom of one.
-        Beat(232, |n| n.down = 1),
-        Beat(246, |n| n.focus = true),
+        // The car's own ring has just gone green. Build it.
+        Beat(286, Press::Craft),
+        // The same two presses, in here: up then down is stone, and the graph re-centres
+        // on it — everything stone goes into, on crossing strings, which is what a graph
+        // looks like when you stand at the bottom of one.
+        Beat(330, Press::Pad(Dir::Up)),
+        Beat(352, Press::Pad(Dir::Down)),
+        // Back out to the world, still holding the stone the code named.
+        Beat(408, Press::Leave),
+        // One last bloom: the whole kit, hanging on a man who now owns a car.
+        Beat(444, Press::Pad(Dir::Down)),
     ]);
     beats
 }
@@ -87,7 +120,6 @@ fn starting_stock() -> Inventory {
 
 pub fn run(out: PathBuf, frames: u32) -> anyhow::Result<()> {
     std::fs::create_dir_all(&out)?;
-    let stock = starting_stock();
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
@@ -101,8 +133,10 @@ pub fn run(out: PathBuf, frames: u32) -> anyhow::Result<()> {
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
             1.0 / FPS as f64,
         )))
-        .insert_resource(forge::Stock(stock.clone()))
-        .insert_resource(forge::Forge::new(Item::Car, stock))
+        .insert_resource(forge::Stock(starting_stock()))
+        .insert_resource(Held(Item::Grass))
+        .init_state::<Stage>()
+        .init_resource::<Belt>()
         .init_resource::<forge::Nav>()
         .init_resource::<forge::CraftRequests>()
         .insert_resource(Film {
@@ -110,32 +144,47 @@ pub fn run(out: PathBuf, frames: u32) -> anyhow::Result<()> {
             frame: 0,
             last: frames,
         })
-        .add_systems(Startup, (scenery, forge::enter))
+        .add_systems(Startup, (scenery, rig::setup, belt::enter).chain())
+        .add_systems(OnEnter(Stage::Forge), (forge::enter, shut_the_belt_camera))
+        .add_systems(OnExit(Stage::Forge), fold_the_forge_away)
         .add_systems(
             Update,
             (
                 press,
+                belt::dress,
+                belt::stations,
+                belt::spin,
+                belt::legs,
+                belt::eye,
+            )
+                .chain()
+                .run_if(in_state(Stage::Belt)),
+        )
+        .add_systems(
+            Update,
+            (
                 forge::drive,
                 pay_for_it,
                 forge::rebuild,
                 forge::react,
                 forge::beads,
-                forge::notches,
                 forge::nodes,
                 forge::cursor,
                 forge::flight,
                 forge::eye,
-                shoot,
             )
-                .chain(),
+                .chain()
+                .run_if(in_state(Stage::Forge)),
         )
+        // Notches are lit the same way in both rooms, and the shutter runs in both.
+        .add_systems(Update, (rig::notches, shoot).chain())
         .run();
     Ok(())
 }
 
-/// A patch of world for the rig to hang in front of. The rig draws over whatever is
-/// behind it without wiping it, and that is the thing worth showing: this is a mode you
-/// enter standing where you were standing.
+/// A patch of world for the rigs to hang in front of. They draw over whatever is behind
+/// them without wiping it, and that is the thing worth showing: these are surfaces you see
+/// standing where you were standing.
 fn scenery(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -222,17 +271,63 @@ fn scenery(
     ));
 }
 
-/// The script's finger on the pad. Counted in *kept* frames, so the beats land where the
+/// The script's thumb on the pad. Counted in *kept* frames, so the beats land where the
 /// film shows them landing however long the warm-up takes.
-fn press(film: Res<Film>, mut nav: ResMut<forge::Nav>) {
+///
+/// The presses go through the same door the player's do: a direction is a direction, and
+/// which room is listening is what decides whether the thing it names lands in a hand or in
+/// the middle of a graph.
+#[allow(clippy::too_many_arguments)]
+fn press(
+    film: Res<Film>,
+    stock: Res<forge::Stock>,
+    stage: Res<State<Stage>>,
+    mut nav: ResMut<forge::Nav>,
+    mut belt: ResMut<Belt>,
+    mut held: ResMut<Held>,
+    mut next: ResMut<NextState<Stage>>,
+    mut commands: Commands,
+) {
     *nav = forge::Nav::default();
     let Some(kept) = film.frame.checked_sub(SETTLE) else {
         return;
     };
     for beat in script() {
-        if beat.0 == kept {
-            beat.1(&mut nav);
+        if beat.0 != kept {
+            continue;
         }
+        match (*stage.get(), beat.1) {
+            (Stage::Belt, Press::Pad(dir)) => {
+                belt::press(Some(dir), &mut belt, &mut held);
+            }
+            // Craft in the world is the door into the recipe rig, on whatever is in hand.
+            (Stage::Belt, Press::Craft) => {
+                commands.insert_resource(forge::Forge::new(held.0, stock.0.clone()));
+                next.set(Stage::Forge);
+            }
+            (Stage::Belt, Press::Leave) => {}
+            (Stage::Forge, Press::Pad(dir)) => nav.dir = Some(dir),
+            (Stage::Forge, Press::Craft) => nav.craft = true,
+            (Stage::Forge, Press::Leave) => next.set(Stage::Belt),
+        }
+    }
+}
+
+/// One room at a time, exactly as the game does it.
+fn shut_the_belt_camera(mut cameras: Query<&mut Camera, With<belt::Rig>>) {
+    for mut camera in &mut cameras {
+        camera.is_active = false;
+    }
+}
+
+fn fold_the_forge_away(
+    mut commands: Commands,
+    rig: Query<Entity, With<forge::Rig>>,
+    mut cameras: Query<&mut Camera, With<belt::Rig>>,
+) {
+    forge::leave(commands.reborrow(), rig);
+    for mut camera in &mut cameras {
+        camera.is_active = true;
     }
 }
 
