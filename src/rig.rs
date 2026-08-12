@@ -488,11 +488,23 @@ pub fn arrowhead(
 /// arrowhead from a sofa, narrow enough not to read as a pair of horns.
 const BARB_LEAN: f32 = 0.62;
 
+/// How much smaller the second arrow of a code is drawn than the first.
+const SECOND: f32 = 0.72;
+
+/// Half the gap between the two tips of a code, as a multiple of the first arrow's size.
+///
+/// An arrowhead's ink runs a whole `size` *back* from its tip, so two tips less than
+/// `1 + SECOND` apart can put the first arrow's barbs through the second's whatever
+/// directions they point — and the worst pair, "left then right", lays them across each
+/// other into the ✕ that [`arrowhead`] exists to avoid drawing. This is that bound with a
+/// little air on top.
+const APART: f32 = 0.95;
+
 /// An item's code, drawn as the two presses it is: the first arrow big, the second small.
 ///
 /// Size is the order — big first, then small — so the pair reads the same whichever way a
-/// child's eye travels, which a left-to-right rule would not. It is the label under every
-/// node in the forge, and the thing that makes the two rigs one alphabet.
+/// child's eye travels, which a left-to-right rule alone would not. It is the label under
+/// every node in the recipe rig, and the thing that makes the two rigs one alphabet.
 pub fn code_glyph(
     commands: &mut Commands,
     kit: &Kit,
@@ -501,12 +513,13 @@ pub fn code_glyph(
     size: f32,
     marker: impl Bundle + Clone,
 ) {
+    const _: () = assert!(APART * 2.0 > 1.0 + SECOND, "the two arrows would overlap");
     let [first, second] = code(item);
     arrowhead(
         commands,
         kit,
         first,
-        at + Vec3::new(-0.24 * size, 0.0, 0.0),
+        at - Vec3::X * APART * size,
         size,
         kit.lit(item),
         marker.clone(),
@@ -515,8 +528,8 @@ pub fn code_glyph(
         commands,
         kit,
         second,
-        at + Vec3::new(0.26 * size, 0.0, 0.0),
-        size * 0.66,
+        at + Vec3::X * APART * size,
+        size * SECOND,
         kit.lit(item),
         marker,
     );

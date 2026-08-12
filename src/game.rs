@@ -1113,14 +1113,12 @@ fn undress_the_forge(
 }
 
 /// The rig is read, not aimed at: the mouse comes back so a player on a keyboard is not
-/// spinning the world behind it while they walk the graph.
-fn let_go_of_the_mouse(
-    mut intent: ResMut<Intent>,
-    mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>,
-) {
-    // Same reason the pause menu does it: a walk in progress has to be let go of, or the
-    // player steps off a cliff while looking at what a car is made of.
-    *intent = Intent::default();
+/// spinning the world behind it while they read the graph.
+///
+/// A walk in progress is let go of by [`hush_intent`], which zeroes the intent on every
+/// frame that is not the world's — the two rooms used to do it themselves on the way in,
+/// once each, which left the frames *after* the first one asserting the old walk.
+fn let_go_of_the_mouse(mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>) {
     grab_mouse(&mut cursor, false);
 }
 

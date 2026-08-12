@@ -220,7 +220,8 @@ impl Graph {
         self.nodes
             .iter()
             .find(|n| n.item == item)
-            .map_or(Vec3::ZERO, |n| n.at)
+            .map(|n| n.at)
+            .expect("a node is only ever asked about while it is laid out")
     }
 
     /// The middle of everything laid out — where the camera points.
@@ -528,13 +529,17 @@ pub fn rebuild(
         );
 
         // And under it, the two presses that put it in the middle. The same arrowheads the
-        // belt hangs on its strings, so a child learns the whole alphabet in whichever
-        // room they happen to be standing in.
+        // belt hangs on its strings, so a child learns the whole alphabet in whichever room
+        // they happen to be standing in.
+        //
+        // Stood in front of the graph rather than in it: directly under a node is where
+        // every string it owes leaves from, and a code drawn among the beads is a code read
+        // through them.
         rig::code_glyph(
             &mut commands,
             &kit,
             node.item,
-            ORIGIN + node.at + Vec3::new(0.0, -0.92, 0.0),
+            ORIGIN + node.at + Vec3::new(0.0, -0.92, 0.7),
             GLYPH,
             (Rig, Built),
         );

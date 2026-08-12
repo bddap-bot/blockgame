@@ -10,7 +10,7 @@ use bevy::window::{CursorOptions, PrimaryWindow};
 
 use crate::game::{NetRole, grab_mouse};
 use crate::hud::Notice;
-use crate::input::{Intent, MenuIntent};
+use crate::input::MenuIntent;
 use crate::menu::{self, Panel, View};
 use crate::net::{Role, Session};
 use crate::ticket::Share;
@@ -50,15 +50,7 @@ pub struct Pause {
     drawn: View,
 }
 
-pub fn open(
-    mut commands: Commands,
-    mut intent: ResMut<Intent>,
-    mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>,
-) {
-    // The world keeps running while the menu is up, so a walk that was in progress has
-    // to be *let go of* rather than merely stop being read — otherwise the player walks
-    // off a cliff while choosing.
-    *intent = Intent::default();
+pub fn open(mut commands: Commands, mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>) {
     grab_mouse(&mut cursor, false);
     let panel = Panel::open(&mut commands);
     commands.insert_resource(Pause {
