@@ -54,11 +54,10 @@ joining player ignores their own seed and gets the host's world.
 | fly on/off     | `F`              | `Y`                  |
 | swing / fire   | hold left click  | hold `R2`            |
 | place block    | right click      | `L2`                 |
-| hotbar         | `1`–`9`, `Q`/`E` | d-pad                |
+| pick a thing   | arrow keys       | d-pad, two presses   |
 | open the rig   | `C`              | `X`                  |
-| walk the rig   | arrows, `WASD`   | d-pad                |
+| aim the rig    | arrow keys       | d-pad, two presses   |
 | make one       | `C`              | `X`                  |
-| stand on it    | `Enter`          | `A`                  |
 | leave the rig  | `Esc` / `R`      | `B` / `Start`        |
 | get in / out   | `R`              | `B`                  |
 | pause menu     | `Esc`            | `Start`              |
@@ -84,12 +83,34 @@ in while you hold the trigger. A **nail** is a crafting part and does nothing on
 Each of those is three numbers on one row of the registry — how far, how fast, how much it
 zooms — so the game has one code path through all of them, and a new tool is a new row.
 
-## Making things
+## Picking things up, and picking things
 
 You start empty-handed. Breaking a block puts it in your pocket; placing one spends it.
 
-The hotbar along the bottom is everything there is to hold. Press craft and **the rig**
-unfolds in the air in front of you, on whatever the hotbar cursor was on.
+There is no bar of cells to walk along. **Every thing you can hold is two presses of the
+d-pad**, and the pad is drawn as the thing you press it with: press any direction and it
+blooms into four clusters in a cross, four things in a cross on each cluster. Press a
+second direction and it shuts on whatever you landed on. Four keys times four keys is
+sixteen, the game holds fourteen things, and none of them is further away than any other.
+
+![the pad open, four clusters in a cross with the forest cluster lit](docs/hotbar.png)
+
+The rest of the time it is a badge in the bottom of the screen: the picture of what is in
+your hand, and under it two little d-pads with one arm lit on each — the code that got it,
+which is the code that gets it back. Nothing on any of it is written. A thing is its
+picture in its own colour, and how many you have is a row of notches under it, up to a
+handful and then one solid bar.
+
+**Every key is a note too.** Down is the lowest and up is the highest, left sits under
+right, and the first press sounds an octave below the second — so each of the sixteen keys
+has its own two-note tune, and a practised thumb hears what it picked before the eyes get
+back to it. The eight notes are arithmetic, not files: the pitch that is played comes out
+of the same table the pad is drawn from.
+
+## Making things
+
+Press craft and **the rig** unfolds in the air in front of you, on whatever you are
+holding.
 
 ![the crafting rig: a car above wood, nails and stone, wired together by beaded strings](docs/design/crafting-forge.gif)
 
@@ -100,9 +121,11 @@ you still owe — so "eight nails, you have three" is five dark beads and not a 
 bar of notches beside a thing is how many you own, and the ring around the cursor is green
 when the button in your hand would make one right now.
 
-The d-pad walks it exactly as it walks the hotbar: left and right along a row, up and down
-between rows. Craft makes one; `A` re-centres the rig on whatever you are pointing at, and
-whatever *that* is made of unfolds under it.
+**The rig has no navigation of its own.** The pad stays up in front of it and goes on
+meaning the same thing, so typing a thing's code in here re-centres the graph on it and
+whatever *that* is made of unfolds underneath — and typing the same code outside puts the
+same thing in your hand. One selection, two views of it: the pad says which thing, the rig
+says what it costs and takes the payment. Craft makes one.
 
 One press makes one thing, deepest first, so holding craft on a car makes its eight nails
 one at a time and then the car — the multi-step build, with the wait replaced by watching
@@ -127,8 +150,6 @@ The cushion is a block you build with, the parachute changes how you fall, and t
 drive. The nail is spent in recipes and does nothing on its own — everyone else still sees
 it in your hand.
 
-![the hotbar after digging up ten stone and making three nails](docs/hotbar.png)
-
 ## Falling
 
 Landing hard hurts. A drop of four blocks is free — a jump never costs anything — and past
@@ -145,7 +166,7 @@ A **cushion** is a block, so you put it where you are going to land. Whatever he
 fell from, hitting one costs nothing, and it throws you back up about a sixth of the way —
 it is a trampoline as much as a safety mat. One boot on it is enough.
 
-A **parachute** is held, not buckled on: pick its hotbar cell and the canopy is open. You
+A **parachute** is held, not buckled on: type its code and the canopy is open. You
 come down at six blocks a second, slower than a hop lands at, and the stick carries you
 further sideways than you fall — so a jump off a tower is a glide to somewhere else. Pick
 it *before* you jump; a fall is over in a second or two.
@@ -159,7 +180,7 @@ stick is worth on the way down.
 <img src="docs/car.png" alt="a blocky blue car with the spaceman standing at the wheel" width="520">
 
 Six wood, two stone and eight nails, and it is the fastest thing you own — comfortably
-quicker than a sprint. Point the hotbar at it and press place to stand it in front of you;
+quicker than a sprint. Type its code and press place to stand it in front of you;
 press it again to put it back in your pocket. `B` gets you in, and `B` gets you out on the
 driver's side.
 
@@ -196,9 +217,13 @@ puts him at the wheel, which is how the seat above got checked.
 |---------------------|-----------------------------------------------------------------|
 | `src/registry.rs`   | **every block and item in the game** — start here to add content |
 | `src/inventory.rs`  | what a player has, and what crafting spends                      |
-| `src/hud.rs`        | crosshair, status line, and the hotbar                           |
+| `src/code.rs`       | **the d-pad codes** — where every thing lives, and what it sounds like |
+| `src/hotbar.rs`     | the pad: the code keyboard, drawn without words                  |
+| `src/glyph.rs`      | what every thing looks like, as a handful of rectangles          |
+| `src/jingle.rs`     | the eight notes a code is made of, synthesised at startup        |
+| `src/hud.rs`        | the crosshair, and the one line the game ever says               |
 | `src/forge.rs`      | **the crafting rig** — the recipe graph, drawn without words     |
-| `src/film.rs`       | `craft-film`: the rig, driven by a script, one PNG a frame       |
+| `src/film.rs`       | `film`: the pad and the rig, driven by a script, one PNG a frame |
 | `src/world.rs`      | chunk storage and seed-deterministic terrain                     |
 | `src/mesh.rs`       | turning voxels into geometry                                     |
 | `src/player.rs`     | movement, collision, and what a landing costs                    |
@@ -225,8 +250,9 @@ travels is which block, and what it became.
 Everything lives in `src/registry.rs`, in two tables.
 
 A **new thing to craft** is one row: an `Item` variant, an arm in `Item::def` naming its
-class and its recipe, and an entry in `Item::ALL`. It appears in the hotbar, is craftable,
-and travels over the network with no other file touched.
+class and its recipe, and an entry in `Item::ALL`, plus a free key on the rosette in
+`src/code.rs` — which is where it gets its code and its tune. It is then craftable and
+travels over the network with no other file touched. An item with no key does not compile.
 
 A **new block** is the same plus its own half: a `Block` variant, an arm in `Block::def`
 giving it a colour, and an item of class `Block` that places it. Colour lives in the mesh,
