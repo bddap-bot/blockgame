@@ -44,29 +44,34 @@ pub const ORIGIN: Vec3 = Vec3::new(0.0, 30_000.0, 0.0);
 const CHEST: Vec3 = Vec3::new(0.0, 1.06, 0.0);
 
 /// How far a cluster hangs from the chest, and how far a thing hangs from its cluster.
-/// The second is under a third of the first, so a cluster reads as one place at a glance
-/// and falls into four when you are looking at it.
-const HOOK: f32 = 2.55;
-const FAN: f32 = 0.74;
+/// The second is half the first, which is the whole of the layout: near enough that a
+/// cluster reads as one place from across a room, far enough that the four things in it —
+/// and the notch bar beside each — never touch when you are looking straight at them.
+const HOOK: f32 = 2.75;
+const FAN: f32 = 1.05;
 
 /// How big a thing hangs: the one in your hand while the rig is shut, one in the cluster
 /// you have opened, and one in a cluster you have not. The last is small on purpose — you
 /// can still see what you own over there, and it is plainly not what the next press is
 /// about.
-const HELD_SCALE: f32 = 0.92;
-const NEAR_SCALE: f32 = 0.82;
+const HELD_SCALE: f32 = 0.55;
+const NEAR_SCALE: f32 = 0.78;
 const FAR_SCALE: f32 = 0.38;
 /// What is left of a thing's size when you own none of it: there, reachable, and visibly
 /// not yours. Picking it is how you get to its recipe, so it is never hidden.
 const GHOST: f32 = 0.52;
 
-/// How far back the camera stands, shut and open. Shut is a figure standing low in the
-/// screen with his kit in his hand; open is the whole constellation.
-const SHUT_REACH: f32 = 5.2;
-const OPEN_REACH: f32 = 8.6;
-/// How far above the chest the shut camera aims, which is what puts the figure in the
+/// How far back the camera stands, shut and open. Shut is a figure with one thing held out
+/// in front of him, small and low in the screen; open is the whole constellation.
+const SHUT_REACH: f32 = 4.6;
+const OPEN_REACH: f32 = 9.2;
+/// How far above the chest the shut camera aims, which is what puts the figure into the
 /// bottom of the frame rather than the middle of it.
-const SHUT_LIFT: f32 = 2.3;
+const SHUT_LIFT: f32 = 0.55;
+
+/// Where everything hangs while the rig is shut: out at the end of his right arm, which is
+/// where the one thing still drawn ends up and where the other thirteen fold back into.
+const SHUT_AT: Vec3 = Vec3::new(0.86, 1.02, 0.45);
 
 /// Seconds the rig takes to bloom, and to fold back up.
 const BLOOM: f32 = 0.18;
@@ -136,6 +141,10 @@ pub struct Rig;
 #[derive(Component)]
 pub struct Eye;
 
+/// The dark pane the bloomed rig is read against.
+#[derive(Component)]
+pub struct Pane;
+
 /// One thing, hanging at its station. The parent that moves and hides; the silhouette and
 /// the notch bar hang under it, so a cluster that folds away takes its counts with it.
 #[derive(Component)]
@@ -201,7 +210,26 @@ pub fn enter(mut commands: Commands, kit: Res<Kit>, palette: Res<Palette>) {
         Transform::from_translation(ORIGIN + Vec3::new(-4.0, 5.0, 9.0)),
     ));
 
-    let body = avatar::spawn(&mut commands, &palette, Transform::from_translation(ORIGIN));
+    // The dark pane the constellation is read against, and the reason the rig can be read
+    // at all: fourteen coloured things hung over a sunlit hillside are fourteen things the
+    // same colour as the hillside. Scaled from nothing rather than faded, so it irises open
+    // with the bloom and takes no second material to animate an alpha through.
+    commands.spawn((
+        Rig,
+        Pane,
+        Mesh3d(kit.cube()),
+        MeshMaterial3d(kit.backdrop()),
+        Transform::from_translation(ORIGIN + CHEST + Vec3::new(0.0, 0.0, -3.0)),
+    ));
+
+    // Turned to face the camera: the model faces -Z and this rig is looked at from +Z, so
+    // an unturned figure is a picture of a backpack.
+    let body = avatar::spawn(
+        &mut commands,
+        &palette,
+        Transform::from_translation(ORIGIN)
+            .with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
+    );
     commands.entity(body.root).insert(Rig);
     commands.insert_resource(Wearer(body));
 
@@ -238,11 +266,15 @@ pub fn enter(mut commands: Commands, kit: Res<Kit>, palette: Res<Palette>) {
     }
 }
 
-/// One leg: the string, and the arrowhead sitting near the far end of it.
+/// One leg: the string, and the arrowhead on it.
 ///
 /// Built out of the same glowing string the recipe graph is wired with, because it is the
 /// same claim — this leads to that — and a player who has been in the forge has already
 /// been taught to follow one.
+///
+/// A first leg wears its arrowhead near the *body* and a second leg near its *thing*, which
+/// is not a nicety: the left-hand station of a cluster lies on the line the first leg came
+/// in along, and an arrowhead at that end would be drawn on top of it.
 fn route(
     commands: &mut Commands,
     kit: &Kit,
@@ -267,11 +299,12 @@ fn route(
             .with_scale(Vec3::new(0.05, along.length(), 0.05)),
         Visibility::Hidden,
     ));
+    let head = if second.is_some() { 0.68 } else { 0.4 };
     rig::arrowhead(
         commands,
         kit,
         points,
-        ORIGIN + to - along * 0.3,
+        ORIGIN + from + along * head,
         0.42,
         kit.string(),
         (Rig, leg),
@@ -345,10 +378,10 @@ pub fn stations(
             GHOST
         };
         at.scale = Vec3::splat(size * owned);
-        // The one thing on show while the rig is shut stays where it is; everything else
-        // folds back into his chest, so opening the belt is the kit coming *off him*.
-        let out = belt.open.max(mine as i32 as f32);
-        at.translation = ORIGIN + CHEST + (station.at - CHEST) * out;
+        // Shut, everything is folded into the one place a thing can be while you are
+        // carrying it: out at the end of the arm holding it. Opening the belt is that fold
+        // coming apart — the kit coming *off him* — and shutting it is the same in reverse.
+        at.translation = ORIGIN + SHUT_AT.lerp(station.at, belt.open);
     }
 }
 
@@ -366,16 +399,16 @@ pub fn spin(time: Res<Time>, mut shapes: Query<(&Spin, &mut Transform)>) {
 /// Every leg of every route: which are drawn, and which one is lit.
 pub fn legs(
     belt: Res<Belt>,
-    held: Res<Held>,
     kit: Res<Kit>,
     mut legs: Query<(&Leg, &mut Visibility, &mut MeshMaterial3d<StandardMaterial>)>,
 ) {
     for (leg, mut seen, mut paint) in &mut legs {
+        // A route is a picture of where a thing hangs, so it is drawn only while things are
+        // hanging: shut, they are all folded into his chest and there is nowhere for a
+        // string to run. Every selection blooms the whole map again, which is what makes the
+        // codes learnable without anybody having to remember one.
         let show = match (belt.armed, leg.second) {
-            // Shut: only the two legs that reach what is in your hand, so the code for the
-            // thing you are carrying is on the screen the whole time you carry it.
-            (None, Some(item)) => item == held.0,
-            (None, None) => code(held.0)[0] == leg.hook,
+            (None, _) => false,
             // Open: all four first legs, and the second legs of the cluster you are in.
             (Some(_), None) => true,
             (Some(hook), Some(_)) => leg.hook == hook,
@@ -395,6 +428,16 @@ pub fn legs(
         if paint.0 != want {
             paint.0 = want;
         }
+    }
+}
+
+/// The pane, irising open with the rig and gone entirely while it is shut — a dark
+/// rectangle hanging over the world with one spaceman on it is a thing between the player
+/// and the game.
+pub fn pane(belt: Res<Belt>, mut pane: Query<&mut Transform, With<Pane>>) {
+    for mut at in &mut pane {
+        let wide = belt.open * OPEN_REACH * 3.4;
+        at.scale = Vec3::new(wide, wide, 0.1);
     }
 }
 

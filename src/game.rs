@@ -344,6 +344,7 @@ pub fn run(start: Start) -> anyhow::Result<()> {
             belt::stations,
             belt::spin,
             belt::legs,
+            belt::pane,
             rig::notches,
             belt::eye,
         )

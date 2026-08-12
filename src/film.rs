@@ -147,37 +147,44 @@ pub fn run(out: PathBuf, frames: u32) -> anyhow::Result<()> {
         .add_systems(Startup, (scenery, rig::setup, belt::enter).chain())
         .add_systems(OnEnter(Stage::Forge), (forge::enter, shut_the_belt_camera))
         .add_systems(OnExit(Stage::Forge), fold_the_forge_away)
+        // One chain, so the order is the order it is written in. The script's thumb is
+        // outside both rooms and runs in either — a `press` that only ran in the room it
+        // started in would leave the film pressing nothing from the moment it walked into
+        // the other one, and a film of a rig nobody is touching looks exactly like a rig
+        // that works.
         .add_systems(
             Update,
             (
                 press,
-                belt::dress,
-                belt::stations,
-                belt::spin,
-                belt::legs,
-                belt::eye,
+                (
+                    belt::dress,
+                    belt::stations,
+                    belt::spin,
+                    belt::legs,
+                    belt::pane,
+                    belt::eye,
+                )
+                    .chain()
+                    .run_if(in_state(Stage::Belt)),
+                (
+                    forge::drive,
+                    pay_for_it,
+                    forge::rebuild,
+                    forge::react,
+                    forge::beads,
+                    forge::nodes,
+                    forge::cursor,
+                    forge::flight,
+                    forge::eye,
+                )
+                    .chain()
+                    .run_if(in_state(Stage::Forge)),
+                // Notches are lit the same way in both rooms, and the shutter runs in both.
+                rig::notches,
+                shoot,
             )
-                .chain()
-                .run_if(in_state(Stage::Belt)),
+                .chain(),
         )
-        .add_systems(
-            Update,
-            (
-                forge::drive,
-                pay_for_it,
-                forge::rebuild,
-                forge::react,
-                forge::beads,
-                forge::nodes,
-                forge::cursor,
-                forge::flight,
-                forge::eye,
-            )
-                .chain()
-                .run_if(in_state(Stage::Forge)),
-        )
-        // Notches are lit the same way in both rooms, and the shutter runs in both.
-        .add_systems(Update, (rig::notches, shoot).chain())
         .run();
     Ok(())
 }

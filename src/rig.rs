@@ -351,8 +351,15 @@ pub fn silhouette(
     marker: impl Bundle,
 ) -> Entity {
     let (parts, model_scale, lift) = icon(item);
+    // `Inherited` and not `Visible`: a rig that hangs its silhouettes under a holder it
+    // hides is the whole of how the belt folds up, and `Visible` means *visible anyway* —
+    // which is fourteen models stacked in one place, in front of the man wearing them.
     commands
-        .spawn((marker, Transform::from_translation(at), Visibility::Visible))
+        .spawn((
+            marker,
+            Transform::from_translation(at),
+            Visibility::Inherited,
+        ))
         .with_children(|model| {
             for p in parts {
                 let p = repaint(p, item);
@@ -435,6 +442,10 @@ pub fn notches(
 
 /// One arrowhead, pointing `dir`: two barbs meeting at a point, in the only geometry this
 /// game has. Written pointing up and turned, so there is one of these and not four.
+///
+/// `at` is the *tip*, and each barb is laid back from it along its own axis rather than
+/// centred on it — two bars centred on one point cross into an X, which is a mark meaning
+/// the opposite of "go this way".
 pub fn arrowhead(
     commands: &mut Commands,
     kit: &Kit,
@@ -444,18 +455,23 @@ pub fn arrowhead(
     paint: Handle<StandardMaterial>,
     marker: impl Bundle + Clone,
 ) {
-    for lean in [0.7f32, -0.7] {
-        let barb = dir.turn() * Quat::from_rotation_z(lean);
+    for lean in [BARB_LEAN, -BARB_LEAN] {
+        let turn = dir.turn() * Quat::from_rotation_z(lean);
+        let along = turn * Vec3::Y;
         commands.spawn((
             marker.clone(),
             Mesh3d(kit.cube()),
             MeshMaterial3d(paint.clone()),
-            Transform::from_translation(at + dir.turn() * Vec3::Y * size * 0.26)
-                .with_rotation(barb)
-                .with_scale(Vec3::new(size * 0.13, size, size * 0.13)),
+            Transform::from_translation(at - along * size * 0.5)
+                .with_rotation(turn)
+                .with_scale(Vec3::new(size * 0.17, size, size * 0.17)),
         ));
     }
 }
+
+/// How far each barb leans off the way the arrow points. Wide enough to read as an
+/// arrowhead from a sofa, narrow enough not to read as a pair of horns.
+const BARB_LEAN: f32 = 0.62;
 
 /// An item's code, drawn as the two presses it is: the first arrow big, the second small.
 ///
