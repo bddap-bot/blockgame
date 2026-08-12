@@ -72,8 +72,8 @@ pub struct Nav {
 /// Crafts the player has asked for and nobody has answered yet.
 ///
 /// Pushed here rather than performed, because who may say a craft happened is the host's
-/// question and this module is a drawing. The game drains it into the same request the
-/// hotbar used to make.
+/// question and this module is a drawing. The game drains it into a craft request for
+/// the host.
 #[derive(Resource, Default)]
 pub struct CraftRequests(pub Vec<Item>);
 

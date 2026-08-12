@@ -26,7 +26,7 @@ pub enum Skin {
     /// Near-black gloss: the visor, the rocket inked on the chest panel, tyres and glass.
     Dark,
     /// Bodywork, painted whatever colour the registry gives [`Item::Car`] — so the car in
-    /// the world and the cell in the hotbar are the same blue by construction.
+    /// the world and its key on the pad are the same blue by construction.
     Paint(Item),
 }
 

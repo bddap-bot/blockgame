@@ -362,6 +362,45 @@ mod tests {
         assert!(pad.arm().is_none());
     }
 
+    /// The flash belongs to the completing press alone: it marks the exact key a code
+    /// landed on, and an opening press — whose mark is the cluster lighting — leaves no
+    /// flash at all. The gate the drawing uses could once never see a second press, so
+    /// this is the property that keeps that regression out.
+    #[test]
+    fn the_completing_press_flashes_its_landing_key() {
+        let mut pad = Pad::default();
+        pad.press(Dir::Left);
+        assert_eq!(pad.flash(), None, "an opening press does not flash a key");
+        pad.press(Dir::Up);
+        let (struck, heat) = pad.flash().expect("the landing key flashes");
+        assert_eq!(
+            struck,
+            Code {
+                arm: Dir::Left,
+                key: Dir::Up
+            }
+        );
+        assert_eq!(heat, 1.0, "brightest at the moment of the press");
+    }
+
+    /// A pause mid-code must not leave the pad open behind the menu, and must not land
+    /// the stale arm on the first press after resume.
+    #[test]
+    fn shut_forgets_a_half_typed_code() {
+        let mut pad = Pad::default();
+        pad.press(Dir::Left);
+        pad.tick(0.1);
+        pad.shut();
+        assert_eq!(pad.arm(), None);
+        assert_eq!(pad.bloom(), 0.0);
+        assert_eq!(pad.flash(), None);
+        assert_eq!(
+            pad.press(Dir::Up),
+            None,
+            "the press after a pause opens an arm, it does not finish the old code"
+        );
+    }
+
     /// The pad opens while a code is half typed and shuts itself after. Nothing else gets
     /// a say, so it cannot be left open over the world.
     #[test]

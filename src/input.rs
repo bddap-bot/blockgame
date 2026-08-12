@@ -38,7 +38,7 @@ pub struct KeyBinds {
     pub use_item: MouseButton,
     /// Tapped: a held place button sprays a wall of blocks nobody asked for.
     pub place_block: MouseButton,
-    /// Makes one of whatever the hotbar cursor is on.
+    /// Makes one of whatever you are holding.
     pub craft: KeyCode,
     /// Gets into the car in front of you, and back out of it again.
     pub ride: KeyCode,
@@ -76,7 +76,7 @@ pub struct PadBinds {
     pub jump: GamepadButton,
     /// Y
     pub toggle_fly: GamepadButton,
-    /// X — makes one of whatever the hotbar cursor is on. The only face button no
+    /// X — makes one of whatever you are holding. The only face button no
     /// movement action uses, so crafting never fights with jumping.
     pub craft: GamepadButton,
     /// B — get in the car, get out of the car. The last free face button, and the one a
@@ -185,7 +185,7 @@ fn deadzoned(v: Vec2) -> Vec2 {
 /// below folds the connected pads into one — a press *any* pad reports is one press, and a
 /// stick takes the strongest reading rather than the sum.
 ///
-/// Summing is what made the TV feel broken: one d-pad press stepped the hotbar two cells,
+/// Summing is what made the TV feel broken: one d-pad press counted as two,
 /// and one stick push turned twice as fast as on the Deck.
 fn tapped(pads: &Query<&Gamepad>, button: GamepadButton) -> bool {
     pads.iter().any(|pad| pad.just_pressed(button))
@@ -248,7 +248,7 @@ pub fn gather_intent(
 }
 
 /// The menu's own read of the same devices. Runs while a menu is up and nowhere else, so
-/// a d-pad press cannot both walk the hotbar and move a menu cursor.
+/// a d-pad press cannot both drum the pad and move a menu cursor.
 pub fn gather_menu_intent(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,

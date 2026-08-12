@@ -241,7 +241,7 @@ pub fn run(start: Start) -> anyhow::Result<()> {
             // a 1280x800 window is native on the Deck's panel but a quarter-resolution
             // image on the TV, which gamescope then stretches to 3840x2160. The HUD is
             // laid out for 800 rows and scaled back up by [`hud::scale_to_screen`], so
-            // the world gets the pixels and the hotbar keeps its size.
+            // the world gets the pixels and the overlay keeps its size.
             mode: WindowMode::BorderlessFullscreen(MonitorSelection::Current),
             ..default()
         }),
@@ -536,8 +536,8 @@ fn apply_intent(
 
     p.yaw += intent.look.x;
 
-    // How the thing in hand falls: a parachute is the hotbar cell you are on, exactly as a
-    // drill is, so opening the canopy is the d-pad and needs no button of its own.
+    // How the thing in hand falls: a parachute is the thing you are holding, exactly as a
+    // drill is, so opening the canopy is typing its code and needs no button of its own.
     let fall = inventories.of(session.me()).falling(held.0);
     player::advance(&sim.0, p, &intent, fall, dt);
 
@@ -1003,7 +1003,7 @@ fn aim_zoom(
     }
 }
 
-/// The craft button in the world opens the rig, on whatever the hotbar cursor is on.
+/// The craft button in the world opens the rig, on whatever you are holding.
 ///
 /// Making a thing is one press *inside* the rig now, not one press outside it: there is
 /// one place a recipe is paid, and it is the place the recipe is drawn.
@@ -1047,7 +1047,7 @@ fn hide_the_words(mut hud: Query<&mut Visibility, With<hud::HudRoot>>) {
     hud::show(&mut hud, false);
 }
 
-/// Puts the rig's craft requests through the same door the hotbar's used: the host pays
+/// Puts the rig's craft requests through the game's one crafting door: the host pays
 /// them, a peer asks the host to.
 fn submit_forge_crafts(
     role: Res<NetRole>,
