@@ -173,6 +173,7 @@ pub fn run(out: PathBuf, scene: Scene, frames: Option<u32>) -> anyhow::Result<()
                 chart::linger,
                 chart::react,
                 chart::stars,
+                chart::plates,
                 chart::notches,
                 chart::rings,
                 chart::threads,

@@ -360,6 +360,7 @@ pub fn run(start: Start) -> anyhow::Result<()> {
                 chart::linger,
                 chart::react,
                 chart::stars,
+                chart::plates,
                 chart::notches,
                 chart::rings,
                 chart::threads,

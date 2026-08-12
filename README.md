@@ -54,7 +54,7 @@ joining player ignores their own seed and gets the host's world.
 | fly on/off     | `F`              | `Y`                  |
 | swing / fire   | hold left click  | hold `R2`            |
 | place block    | right click      | `L2`                 |
-| hotbar         | `1`–`9`, `Q`/`E` | d-pad                |
+| pick a thing   | arrows           | d-pad                |
 | open the rig   | `C`              | `X`                  |
 | walk the rig   | arrows, `WASD`   | d-pad                |
 | make one       | `C`              | `X`                  |
@@ -88,8 +88,26 @@ zooms — so the game has one code path through all of them, and a new tool is a
 
 You start empty-handed. Breaking a block puts it in your pocket; placing one spends it.
 
-The hotbar along the bottom is everything there is to hold. Press craft and **the rig**
-unfolds in the air in front of you, on whatever the hotbar cursor was on.
+**The constellation** is everything there is to hold. Your empty hand is in the middle of
+it and every item hangs off it as a star, one press of the d-pad away or two — and those
+presses *are* the thing's name: stone is down, a nail is right-up, the car is left-up. Press
+a direction and the chart blooms out of your hand with the run of threads you walked lit up;
+stop pressing and it folds back into the one thing you are carrying, hanging low on the
+screen with its own code drawn under it as one little d-pad per press. Walk back the way you
+came and you are empty-handed again, so putting a thing down needs no button either.
+
+![the constellation open: fourteen stars around a hand, green rings on everything that could be built right now](docs/constellation.png)
+
+There is not a word on it. How big a star is drawn says whether you own any, the bar of
+notches beside it says how many, and a green ring says the pile would pay for one right now
+— so "what can I build?" is a colour you scan for.
+
+Press craft and **the rig** leans into whatever star you are standing on: the same items,
+the same colours, the same rings, one neighbourhood at a time. One map at two zooms, the
+same d-pad through both. `blockgame craft-film --scene chart` plays the whole loop to
+itself — punch a code, lean in, build, come back out — and
+[`docs/design/hotbar-constellation.gif`](docs/design/hotbar-constellation.gif) is what it
+wrote.
 
 ![the crafting rig: a car above wood, nails and stone, wired together by beaded strings](docs/design/crafting-forge.gif)
 
@@ -100,9 +118,9 @@ you still owe — so "eight nails, you have three" is five dark beads and not a 
 bar of notches beside a thing is how many you own, and the ring around the cursor is green
 when the button in your hand would make one right now.
 
-The d-pad walks it exactly as it walks the hotbar: left and right along a row, up and down
-between rows. Craft makes one; `A` re-centres the rig on whatever you are pointing at, and
-whatever *that* is made of unfolds under it.
+The d-pad walks it as it walks the chart: left and right along a row, up and down between
+rows. Craft makes one; `A` re-centres the rig on whatever you are pointing at, and whatever
+*that* is made of unfolds under it.
 
 One press makes one thing, deepest first, so holding craft on a car makes its eight nails
 one at a time and then the car — the multi-step build, with the wait replaced by watching
@@ -127,8 +145,6 @@ The cushion is a block you build with, the parachute changes how you fall, and t
 drive. The nail is spent in recipes and does nothing on its own — everyone else still sees
 it in your hand.
 
-![the hotbar after digging up ten stone and making three nails](docs/hotbar.png)
-
 ## Falling
 
 Landing hard hurts. A drop of four blocks is free — a jump never costs anything — and past
@@ -145,7 +161,7 @@ A **cushion** is a block, so you put it where you are going to land. Whatever he
 fell from, hitting one costs nothing, and it throws you back up about a sixth of the way —
 it is a trampoline as much as a safety mat. One boot on it is enough.
 
-A **parachute** is held, not buckled on: pick its hotbar cell and the canopy is open. You
+A **parachute** is held, not buckled on: punch its code and the canopy is open. You
 come down at six blocks a second, slower than a hop lands at, and the stick carries you
 further sideways than you fall — so a jump off a tower is a glide to somewhere else. Pick
 it *before* you jump; a fall is over in a second or two.
@@ -159,7 +175,7 @@ stick is worth on the way down.
 <img src="docs/car.png" alt="a blocky blue car with the spaceman standing at the wheel" width="520">
 
 Six wood, two stone and eight nails, and it is the fastest thing you own — comfortably
-quicker than a sprint. Point the hotbar at it and press place to stand it in front of you;
+quicker than a sprint. Hold it — left, up — and press place to stand it in front of you;
 press it again to put it back in your pocket. `B` gets you in, and `B` gets you out on the
 driver's side.
 
@@ -196,9 +212,11 @@ puts him at the wheel, which is how the seat above got checked.
 |---------------------|-----------------------------------------------------------------|
 | `src/registry.rs`   | **every block and item in the game** — start here to add content |
 | `src/inventory.rs`  | what a player has, and what crafting spends                      |
-| `src/hud.rs`        | crosshair, status line, and the hotbar                           |
+| `src/chart.rs`      | **the constellation** — where each item is, and its d-pad code   |
+| `src/icons.rs`      | what a thing looks like off the ground, for both surfaces        |
+| `src/hud.rs`        | the crosshair, and the one line the game ever says               |
 | `src/forge.rs`      | **the crafting rig** — the recipe graph, drawn without words     |
-| `src/film.rs`       | `craft-film`: the rig, driven by a script, one PNG a frame       |
+| `src/film.rs`       | `craft-film`: either surface, driven by a script, one PNG a frame |
 | `src/world.rs`      | chunk storage and seed-deterministic terrain                     |
 | `src/mesh.rs`       | turning voxels into geometry                                     |
 | `src/player.rs`     | movement, collision, and what a landing costs                    |
@@ -225,7 +243,8 @@ travels is which block, and what it became.
 Everything lives in `src/registry.rs`, in two tables.
 
 A **new thing to craft** is one row: an `Item` variant, an arm in `Item::def` naming its
-class and its recipe, and an entry in `Item::ALL`. It appears in the hotbar, is craftable,
+class and its recipe, and an entry in `Item::ALL`. It takes the next free exit on the
+constellation — so it arrives with a code of its own and moves nobody else's — is craftable,
 and travels over the network with no other file touched.
 
 A **new block** is the same plus its own half: a `Block` variant, an arm in `Block::def`

@@ -66,7 +66,7 @@ const EMPTY: f32 = 0.62;
 /// Where the eye stands at rest and when the chart is open, and how far above the held star
 /// it looks — which is what hangs that star low on the screen, where a hotbar goes.
 const REST_BACK: f32 = 7.5;
-const REST_LIFT: f32 = 1.5;
+const REST_LIFT: f32 = 1.05;
 const OPEN_BACK: f32 = 13.0;
 
 /// One press of the d-pad.
@@ -321,11 +321,16 @@ pub struct Thread {
 /// A piece of the code drawn under your hand. Torn down and rebuilt when the cursor moves,
 /// which is at most once a press.
 #[derive(Component)]
-pub struct Chip;
+pub struct Chip(Vec3);
 
-/// The dark pane the chart is read against once it is open.
+/// The dark plate behind one star.
+///
+/// The rig can put a pane behind the whole screen because it is a mode you are standing in.
+/// The chart is not — it hangs over a world being played, and dimming that world to read a
+/// hotbar is the wrong trade. So the dark is exactly as big as the thing that needs it: a
+/// white nail against a sunlit stone cliff is still a nail.
 #[derive(Component)]
-pub struct Backdrop;
+pub struct Plate(At);
 
 #[derive(Component)]
 pub struct Eye;
@@ -340,9 +345,10 @@ pub struct Kit {
     dark: Handle<StandardMaterial>,
     thread: Handle<StandardMaterial>,
     trail: Handle<StandardMaterial>,
+    pad: Handle<StandardMaterial>,
     ready: Handle<StandardMaterial>,
     cursor: Handle<StandardMaterial>,
-    backdrop: Handle<StandardMaterial>,
+    plate: Handle<StandardMaterial>,
 }
 
 fn glow(
@@ -378,12 +384,16 @@ pub fn enter(
             perceptual_roughness: 0.9,
             ..default()
         }),
-        thread: glow(&mut materials, Color::srgb(0.24, 0.30, 0.40), 0.5),
-        trail: glow(&mut materials, Color::srgb(0.62, 0.80, 1.0), 2.6),
+        thread: glow(&mut materials, Color::srgb(0.16, 0.20, 0.29), 0.35),
+        trail: glow(&mut materials, Color::srgb(0.70, 0.86, 1.0), 3.2),
+        // The unpressed arms of the little d-pads under your hand. Pale rather than dark,
+        // because the code has to read against a sunlit cliff as well as against sky, and
+        // it is the only thing on the chart with no colour of its own to be seen by.
+        pad: glow(&mut materials, Color::srgb(0.42, 0.46, 0.56), 0.5),
         ready: glow(&mut materials, Color::srgb(0.45, 1.0, 0.5), 4.0),
         cursor: glow(&mut materials, Color::srgb(1.0, 0.95, 0.75), 3.0),
-        backdrop: materials.add(StandardMaterial {
-            base_color: Color::srgba(0.02, 0.03, 0.06, 0.62),
+        plate: materials.add(StandardMaterial {
+            base_color: Color::srgba(0.03, 0.04, 0.08, 0.66),
             alpha_mode: AlphaMode::Blend,
             unlit: true,
             ..default()
@@ -433,15 +443,14 @@ pub fn enter(
             },
             Transform::from_xyz(-4.0, 5.0, 10.0),
         ));
-        chart_root.spawn((
-            Backdrop,
-            Mesh3d(kit.cube.clone()),
-            MeshMaterial3d(kit.backdrop.clone()),
-            Transform::from_xyz(0.0, 0.0, -3.0).with_scale(Vec3::new(30.0, 30.0, 0.1)),
-        ));
-
         // Your hand, at the middle. Drawn out of the spaceman's own mitten, so the thing
         // every code starts from is visibly you.
+        chart_root.spawn((
+            Plate(At::Hand),
+            Mesh3d(kit.cube.clone()),
+            MeshMaterial3d(kit.plate.clone()),
+            Transform::from_xyz(0.0, 0.0, -0.6),
+        ));
         chart_root
             .spawn((
                 HandView,
@@ -476,6 +485,15 @@ pub fn enter(
                 Transform::from_translation(((from + star.at) / 2.0).extend(-0.3))
                     .with_rotation(Quat::from_rotation_z(along.to_angle()))
                     .with_scale(Vec3::new(along.length(), 0.05, 0.05)),
+            ));
+
+            chart_root.spawn((
+                Plate(At::On(*item)),
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(kit.plate.clone()),
+                // Off-centre by enough to take the notch bar in with it: the count is as
+                // hard to read against a cliff as the thing it counts.
+                Transform::from_translation((star.at + Vec2::new(0.18, 0.0)).extend(-0.6)),
             ));
 
             chart_root
@@ -640,6 +658,21 @@ pub fn stars(
     }
 }
 
+/// The dark plates, which come and go with the things they are behind.
+///
+/// Its own system, like everything else that moves here: two systems asking for
+/// `&mut Transform` over overlapping sets is a query conflict bevy refuses at startup, and
+/// a plate is not a star.
+///
+/// Unlike a star a plate does not shrink for a thing you have none of — an empty star is
+/// exactly the one that needs the contrast most.
+pub fn plates(chart: Res<Chart>, held: Res<Held>, mut plates: Query<(&Plate, &mut Transform)>) {
+    for (plate, mut at) in &mut plates {
+        let shown = if held.0 == plate.0 { 1.15 } else { chart.open };
+        at.scale = Vec3::new(1.78 * shown, 1.55 * shown, 0.02);
+    }
+}
+
 /// The bar beside each star: one notch lit per one owned.
 pub fn notches(
     stock: Res<Stock>,
@@ -755,7 +788,7 @@ pub fn chip(
     root: Query<Entity, With<ChartRoot>>,
     chips: Query<Entity, With<Chip>>,
     mut drawn: Local<Option<At>>,
-    mut showing: Query<&mut Transform, With<Chip>>,
+    mut showing: Query<(&Chip, &mut Transform)>,
 ) {
     if *drawn != Some(held.0) {
         *drawn = Some(held.0);
@@ -770,40 +803,53 @@ pub fn chip(
         };
         let code = chart.code(item);
         let middle = (code.len() as f32 - 1.0) / 2.0;
-        let under = chart.star(item).at + Vec2::new(0.0, -1.25);
+        let under = chart.star(item).at + Vec2::new(0.0, -1.45);
         commands.entity(root).with_children(|chip| {
+            // Its own dark plate, for the stars' reason: a pale grey d-pad against a
+            // sunlit stone cliff is a code nobody can read back.
+            let plate = Vec3::new(code.len() as f32 * 1.05 + 0.45, 1.0, 0.02);
+            chip.spawn((
+                Chip(plate),
+                Mesh3d(kit.cube.clone()),
+                MeshMaterial3d(kit.plate.clone()),
+                Transform::from_translation(under.extend(-0.5)).with_scale(plate),
+            ));
             for (nth, dir) in code.iter().enumerate() {
-                let at = under + Vec2::new((nth as f32 - middle) * 0.80, dir.note() * 0.20);
-                // The pad itself: a hub and four arms, one of which is the press.
+                let at = under + Vec2::new((nth as f32 - middle) * 1.05, dir.note() * 0.20);
+                // The pad itself: a hub and four arms, one of which is the press. The
+                // pressed arm wears the thing's own colour, so the code and the star it
+                // reaches are the same colour as well as the same shape.
+                let hub = Vec3::splat(0.20);
                 chip.spawn((
-                    Chip,
+                    Chip(hub),
                     Mesh3d(kit.cube.clone()),
-                    MeshMaterial3d(kit.dark.clone()),
-                    Transform::from_translation(at.extend(0.0)).with_scale(Vec3::splat(0.14)),
+                    MeshMaterial3d(kit.pad.clone()),
+                    Transform::from_translation(at.extend(0.0)).with_scale(hub),
                 ));
                 for arm in Dir::ALL {
-                    let paint = if arm == *dir {
-                        kit.lit[item.index()].clone()
+                    let (paint, size) = if arm == *dir {
+                        (kit.lit[item.index()].clone(), Vec3::splat(0.28))
                     } else {
-                        kit.dark.clone()
+                        (kit.pad.clone(), Vec3::splat(0.19))
                     };
                     chip.spawn((
-                        Chip,
+                        Chip(size),
                         Mesh3d(kit.cube.clone()),
                         MeshMaterial3d(paint),
-                        Transform::from_translation((at + arm.unit() * 0.17).extend(0.0))
-                            .with_scale(Vec3::splat(0.13)),
+                        Transform::from_translation((at + arm.unit() * 0.27).extend(0.0))
+                            .with_scale(size),
                     ));
                 }
             }
         });
         return;
     }
-    // Open, the path says it better than the chip does.
-    let scale = Vec3::splat(1.0 - chart.open);
-    for mut at in showing.iter_mut() {
-        if at.scale != scale {
-            at.scale = scale;
+    // Open, the lit path says it better than the chip does, so the chip gets out of the way.
+    let left = 1.0 - chart.open;
+    for (chip, mut at) in showing.iter_mut() {
+        let want = chip.0 * left;
+        if at.scale != want {
+            at.scale = want;
         }
     }
 }
