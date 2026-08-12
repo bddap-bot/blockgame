@@ -30,22 +30,22 @@ use crate::inventory::{Held, Inventory, Pocket};
 use crate::registry::Item;
 
 /// A key's picture. Everything else on the pad is sized off it.
-const CELL: f32 = 28.0;
+const CELL: f32 = 32.0;
 /// Centre to centre from a cluster's middle out to one of its four keys.
-const KEY_STEP: f32 = 48.0;
+const KEY_STEP: f32 = 50.0;
 /// Centre to centre from the middle of the pad out to one of its four clusters.
 const ARM_STEP: f32 = 150.0;
 /// Where the middle of the pad sits while it is open, and where the held thing sits while
 /// it is shut. It moves because the shut pad is a badge at the bottom of the screen and the
 /// open pad is a keyboard in the middle of it, and watching the badge fly into the middle
 /// of the keyboard is what says they are the same object.
-const PAD_AT: Vec2 = Vec2::new(640.0, 566.0);
+const PAD_AT: Vec2 = Vec2::new(640.0, 552.0);
 const REST_AT: Vec2 = Vec2::new(640.0, 742.0);
 /// The held thing, drawn twice the size of a key: the one thing on this surface a player
 /// is looking at while they play.
 const HUB: f32 = 56.0;
 /// A little d-pad with one arm lit — the unit both halves of a code are drawn as.
-const CHIP: f32 = 18.0;
+const CHIP: f32 = 20.0;
 
 /// The most notches drawn of anything. Past this the bar goes solid: the question a child
 /// asks of a pile is "enough?" and never "how many exactly?", and the rig counts out the
@@ -54,9 +54,33 @@ const MANY: u32 = 8;
 const NOTCH: f32 = 2.6;
 const NOTCH_GAP: f32 = 1.2;
 
-const PANEL: Color = Color::srgba(0.05, 0.06, 0.09, 0.78);
-const KEY_PLATE: Color = Color::srgba(0.12, 0.13, 0.18, 0.92);
-const SPARE: Color = Color::srgba(1.0, 1.0, 1.0, 0.07);
+const PANEL: Color = Color::srgba(0.04, 0.05, 0.08, 0.62);
+const KEY_PLATE: Color = Color::srgba(0.10, 0.11, 0.15, 0.88);
+const SPARE: Color = Color::srgba(1.0, 1.0, 1.0, 0.09);
+/// How far back the three clusters a half-typed code is *not* on are pushed. Dimmed rather
+/// than hidden: pressing one key is how a child is shown the other three.
+const ASIDE: f32 = 0.62;
+/// How dark a thing you have none of is drawn. Darkened, never faded: fading it as well
+/// would multiply the two dimmings together on a cluster that is also pushed aside, and
+/// four of the fourteen things would be invisible whenever the pad was open anywhere else.
+const UNOWNED: f32 = 0.55;
+/// One cluster's plate, as a side. Everything that has to not overlap is derived from it.
+const CLUSTER: f32 = 2.0 * KEY_STEP + CELL + 14.0;
+
+/// Nothing on the pad may be drawn on top of anything else on it — two keys under one
+/// another are one key as far as a thumb is concerned, and a key a thumb cannot single out
+/// is a thing the player cannot hold.
+///
+/// Checked while the game is compiled, because these are all constants: a layout that
+/// collides is a typo, and a typo should not need a test run to find.
+const _: () = {
+    assert!(ARM_STEP >= CLUSTER, "the clusters overlap each other");
+    assert!(KEY_STEP > CELL + 16.0, "the keys of a cluster overlap");
+    assert!(
+        (HUB + CHIP + 22.0) * 0.5 < ARM_STEP - CLUSTER * 0.5,
+        "the held thing is drawn inside a cluster"
+    );
+};
 
 /// One coloured rectangle. The whole surface is a list of these, so what is on the screen
 /// is a pure function of the pad and the pile — which is what makes the layout testable
@@ -115,6 +139,25 @@ pub fn paint(pad: &Pad, pile: &Inventory, held: Item) -> Vec<Quad> {
     };
 
     if bloom > 0.01 {
+        // The spokes first, under everything: four bars out of the middle, one per key, so
+        // the whole surface reads as a d-pad with a d-pad on the end of each arm rather
+        // than as four boxes that happen to be arranged in a cross.
+        for arm in Dir::ALL {
+            let reach = ARM_STEP * look.spring;
+            let (w, h) = match arm {
+                Dir::Left | Dir::Right => (reach, 8.0),
+                Dir::Up | Dir::Down => (8.0, reach),
+            };
+            let fade = if pad.arm() == Some(arm) { 0.85 } else { 0.22 };
+            quad(
+                &mut out,
+                look.middle + arm.unit() * (reach * 0.5),
+                w,
+                h,
+                4.0,
+                arm.tint().with_alpha(fade * bloom),
+            );
+        }
         for arm in Dir::ALL {
             cluster(&mut out, &look, arm);
         }
@@ -131,26 +174,39 @@ fn cluster(out: &mut Vec<Quad>, look: &Look, arm: Dir) {
     let bloom = look.bloom;
     let open = look.pad.arm();
     let mine = open == Some(arm);
-    let lit = if mine || open.is_none() { 1.0 } else { 0.45 };
+    let lit = if mine || open.is_none() { 1.0 } else { ASIDE };
     let at = look.middle + arm.unit() * (ARM_STEP * look.spring);
 
-    let side = 2.0 * KEY_STEP + CELL + 22.0;
-    let plate = if mine {
-        arm.tint().with_alpha(0.20 * bloom)
-    } else {
-        PANEL.with_alpha(PANEL.alpha() * bloom * 0.9)
-    };
-    quad(out, at, side, side, 22.0, plate);
+    // The dark plate goes under every cluster, and the arm's colour goes on top of the
+    // lit one. Tint alone was invisible: a cyan wash over a blue sky is a blue sky, and
+    // the surface has to read the same over sand, stone and a forest.
+    quad(
+        out,
+        at,
+        CLUSTER,
+        CLUSTER,
+        24.0,
+        PANEL.with_alpha(PANEL.alpha() * bloom),
+    );
     if mine {
+        quad(
+            out,
+            at,
+            CLUSTER,
+            CLUSTER,
+            24.0,
+            arm.tint().with_alpha(0.22 * bloom),
+        );
         // A ring of the arm's own colour, so the lit cluster is the same colour as the key
-        // that opened it and as the first chip under the held thing.
+        // that opened it, as the spoke leading to it, and as the first chip under the held
+        // thing. Four places, one hue, one press.
         ring(
             out,
             at,
-            side,
-            3.0,
-            22.0,
-            arm.tint().with_alpha(0.75 * bloom),
+            CLUSTER,
+            3.5,
+            24.0,
+            arm.tint().with_alpha(0.9 * bloom),
         );
     }
 
@@ -180,8 +236,8 @@ fn cell(
     lit: f32,
 ) {
     let n = look.pile.count(item);
-    let w = CELL + 12.0;
-    let h = CELL + 18.0;
+    let w = CELL + 10.0;
+    let h = CELL + 16.0;
     quad(
         out,
         at,
@@ -203,8 +259,8 @@ fn cell(
     }
     // A thing you have none of is still drawn, still in its place, just dark — that is how
     // you find out it exists and go and read its recipe.
-    let ink = if n > 0 { lit } else { lit * 0.34 };
-    picture(out, at - Vec2::new(0.0, 6.0), CELL, item, ink);
+    let dark = if n > 0 { 1.0 } else { UNOWNED };
+    picture(out, at - Vec2::new(0.0, 6.0), CELL, item, dark, lit);
     notches(out, at + Vec2::new(0.0, CELL * 0.5 + 1.0), item, n, lit);
 }
 
@@ -230,21 +286,20 @@ fn hub(out: &mut Vec<Quad>, look: &Look) {
         HUB,
         held,
         1.0,
+        1.0,
     );
 
+    // At rest the two chips are a label: the code of the thing in your hand, which is the
+    // code that gets it back. Mid-code they are a progress bar instead — the key you just
+    // hit, and an unpressed pad waiting for the second one.
+    let keys = match look.pad.arm() {
+        Some(arm) => [Some(arm), None],
+        None => [Some(code.arm), Some(code.key)],
+    };
     let row = middle + Vec2::new(0.0, HUB * 0.5 - 1.0);
-    for (i, dir) in [code.arm, code.key].into_iter().enumerate() {
-        // The first chip lights while the arm is chosen and the second while it is not,
-        // so the pair reads as "this half is done" — a progress bar two keys long.
-        let done = (i == 0) == look.pad.arm().is_some();
+    for (i, key) in keys.into_iter().enumerate() {
         let x = (i as f32 - 0.5) * (CHIP + 6.0);
-        chip(
-            out,
-            row + Vec2::new(x, 0.0),
-            CHIP,
-            dir,
-            if done { 1.0 } else { 0.5 },
-        );
+        chip(out, row + Vec2::new(x, 0.0), CHIP, key, 1.0);
     }
 }
 
@@ -252,7 +307,7 @@ fn hub(out: &mut Vec<Quad>, look: &Look) {
 ///
 /// The same cross as the pad it is a picture of, which is the whole trick: the thing a
 /// player learns at the size of the screen is the thing they read at the size of a badge.
-fn chip(out: &mut Vec<Quad>, at: Vec2, size: f32, lit: Dir, bright: f32) {
+fn chip(out: &mut Vec<Quad>, at: Vec2, size: f32, lit: Option<Dir>, bright: f32) {
     let arm = size * 0.30;
     quad(
         out,
@@ -263,7 +318,7 @@ fn chip(out: &mut Vec<Quad>, at: Vec2, size: f32, lit: Dir, bright: f32) {
         Color::srgba(1.0, 1.0, 1.0, 0.22 * bright),
     );
     for dir in Dir::ALL {
-        let on = dir == lit;
+        let on = Some(dir) == lit;
         let colour = if on {
             dir.tint().with_alpha(bright)
         } else {
@@ -300,35 +355,42 @@ fn notches(out: &mut Vec<Quad>, at: Vec2, item: Item, n: u32, lit: f32) {
         );
         return;
     }
-    for i in 0..MANY {
-        let x = (i as f32 - (MANY - 1) as f32 / 2.0) * (NOTCH + NOTCH_GAP);
-        let on = i < n;
+    // Only the ones you have are drawn. An empty row of sockets under every one of
+    // fourteen keys is a lot of dots that all mean nothing, and "none" reads better as
+    // nothing at all than as eight empty holes.
+    for i in 0..n {
+        let x = (i as f32 - (n - 1) as f32 / 2.0) * (NOTCH + NOTCH_GAP);
         quad(
             out,
             at + Vec2::new(x, 0.0),
             NOTCH,
             NOTCH * 1.6,
             NOTCH * 0.5,
-            Color::srgba(1.0, 1.0, 1.0, if on { 0.92 * lit } else { 0.13 * lit }),
+            Color::srgba(1.0, 1.0, 1.0, 0.92 * lit),
         );
     }
 }
 
 /// An item's picture, drawn in its own colour inside a square of `size`.
-fn picture(out: &mut Vec<Quad>, at: Vec2, size: f32, item: Item, lit: f32) {
+///
+/// `dark` is how far toward black the colour is taken — what "you have none of these"
+/// looks like. `alpha` is how far the whole thing has faded in — what the bloom and the
+/// pushed-aside clusters do. Two knobs rather than one, because they mean different things
+/// and multiplying them together is how a picture ends up drawn in no colour at all.
+fn picture(out: &mut Vec<Quad>, at: Vec2, size: f32, item: Item, dark: f32, alpha: f32) {
     let base = item.color();
     let corner = at - Vec2::splat(size * 0.5);
     for part in glyph::of(item) {
         let short = part.w.min(part.h) * size;
-        let colour = glyph::shaded(base, part.tone).to_linear();
+        let c = glyph::shaded(base, part.tone).to_linear();
         out.push(Quad {
             x: corner.x + part.x * size,
             y: corner.y + part.y * size,
             w: part.w * size,
             h: part.h * size,
             round: part.round * short * 0.5,
-            color: Color::linear_rgb(colour.red * lit, colour.green * lit, colour.blue * lit)
-                .with_alpha(lit.min(1.0)),
+            color: Color::linear_rgb(c.red * dark, c.green * dark, c.blue * dark)
+                .with_alpha(alpha.min(1.0)),
         });
     }
 }
@@ -499,48 +561,50 @@ mod tests {
         }
     }
 
-    /// Nothing on the pad overlaps anything on another arm. Two keys drawn on top of each
-    /// other are one key as far as a thumb is concerned.
-    #[test]
-    fn the_clusters_do_not_touch() {
-        let span = 2.0 * KEY_STEP + CELL + 22.0;
-        assert!(
-            ARM_STEP >= span,
-            "clusters are {span} across and {ARM_STEP} apart"
-        );
-        let key = (CELL + 18.0) * 0.5;
-        assert!(KEY_STEP > key * 2.0 - 4.0, "keys within a cluster collide");
-    }
-
-    /// The count is a shape and never a number: eight notches at most, and one bar for
-    /// anything past that. A hundred stone may not become a hundred rectangles.
+    /// The count is a shape and never a number, and the shape has a ceiling: eight
+    /// notches at most, and one solid bar for anything past that. A hundred stone may not
+    /// become a hundred rectangles, and four hundred may not cost more to draw than eight.
     #[test]
     fn a_big_pile_is_one_bar_not_a_hundred_notches() {
-        let mut pile = Inventory::default();
-        pile.add(Item::Stone, 400);
-        let quads = paint(&opened(Dir::Left), &pile, Item::Stone);
-        let few = paint(&opened(Dir::Left), &Inventory::default(), Item::Stone);
-        assert!(quads.len() < few.len(), "a full pile drew more rectangles");
+        let pile_of = |n: u32| {
+            let mut pile = Inventory::default();
+            for item in Item::ALL {
+                pile.add(*item, n);
+            }
+            pile
+        };
+        let full = paint(&opened(Dir::Left), &pile_of(MANY), Item::Stone).len();
+        let heaped = paint(&opened(Dir::Left), &pile_of(400), Item::Stone).len();
+        assert!(
+            heaped < full,
+            "four hundred of everything drew {heaped} rectangles against {full} for eight"
+        );
     }
 
-    /// Holding a thing puts a ring on its key, and only on its key.
+    /// The ring lands on the key of the thing in your hand, and on no other key —
+    /// wherever that key is, and whichever arm the pad happens to be open on.
+    ///
+    /// Drawn against an empty pile on purpose: with nothing owned, nothing else on the pad
+    /// is solid white, so what this measures really is the ring.
     #[test]
-    fn the_thing_in_your_hand_is_ringed() {
-        let white = |quads: &[Quad]| {
-            quads
-                .iter()
-                .filter(|q| q.color.to_srgba().alpha > 0.5 && q.color.to_srgba().red > 0.95)
-                .count()
+    fn only_the_thing_in_your_hand_is_ringed() {
+        let solid_white = |q: &&Quad| {
+            let c = q.color.to_srgba();
+            c.red > 0.95 && c.green > 0.95 && c.blue > 0.95 && c.alpha > 0.4
         };
-        let ringed = white(&paint(
-            &opened(Dir::Left),
-            &Inventory::default(),
-            Item::Dirt,
-        ));
-        let elsewhere = white(&paint(&opened(Dir::Left), &Inventory::default(), Item::Car));
-        assert!(
-            ringed > elsewhere,
-            "the ring did not follow the held thing onto the open arm"
-        );
+        for held in Item::ALL {
+            let c = code::of(*held);
+            let want = PAD_AT + c.arm.unit() * ARM_STEP + c.key.unit() * KEY_STEP;
+            let quads = paint(&opened(Dir::Left), &Inventory::default(), *held);
+            let ringed: Vec<Vec2> = quads
+                .iter()
+                .filter(solid_white)
+                .map(|q| Vec2::new(q.x + q.w * 0.5, q.y + q.h * 0.5))
+                .collect();
+            assert!(!ringed.is_empty(), "{held:?} wears no ring");
+            for at in ringed {
+                assert!(at.distance(want) < CELL, "{held:?} is ringed at {at}");
+            }
+        }
     }
 }
