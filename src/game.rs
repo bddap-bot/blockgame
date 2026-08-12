@@ -13,12 +13,13 @@ use bevy::window::{CursorGrabMode, CursorOptions, MonitorSelection, PrimaryWindo
 use std::collections::{HashMap, HashSet};
 
 use crate::avatar;
+use crate::chart;
 use crate::forge;
 use crate::hud;
 use crate::input::{
     Intent, MenuIntent, PITCH_LIMIT, gather_forge_nav, gather_intent, gather_menu_intent,
 };
-use crate::inventory::{Held, Inventories, Inventory};
+use crate::inventory::{Held, Inventories, Inventory, Stock};
 use crate::mesh::{ChunkMesh, build_chunk_mesh};
 use crate::net::wire::CarPose;
 use crate::net::{Boot, Event, Msg, PlayerId, Pose, Role, Session, Target, lan};
@@ -250,8 +251,10 @@ pub fn run(start: Start) -> anyhow::Result<()> {
     .init_resource::<Intent>()
     .init_resource::<MenuIntent>()
     .init_resource::<forge::Nav>()
-    .init_resource::<forge::Stock>()
     .init_resource::<forge::CraftRequests>()
+    .init_resource::<chart::Chart>()
+    .init_resource::<chart::Reach>()
+    .init_resource::<Stock>()
     .init_resource::<Held>()
     .init_resource::<Chunks>()
     .init_resource::<Digging>()
@@ -294,7 +297,7 @@ pub fn run(start: Start) -> anyhow::Result<()> {
     )
     .add_systems(
         OnEnter(Phase::World),
-        (enter_world, setup, hud::setup).chain(),
+        (enter_world, setup, hud::setup, chart::enter).chain(),
     )
     .add_systems(OnEnter(Playing::Paused), pause::open)
     .add_systems(OnExit(Playing::Paused), pause::close)
@@ -346,7 +349,25 @@ pub fn run(start: Start) -> anyhow::Result<()> {
             stream_chunks,
             remesh_dirty,
             net_send_pose,
-            hud::update_hotbar,
+            // The pile, then the chart drawn from it. Selection is gated on being *in* the
+            // world for the same reason crafting is: the pad belongs to the menu or the rig
+            // while either is up, and a stale [`Intent`] would otherwise keep stepping.
+            show_the_pile,
+            (reach_for_it, chart::drive)
+                .chain()
+                .run_if(in_state(Playing::Live)),
+            (
+                chart::linger,
+                chart::react,
+                chart::stars,
+                chart::notches,
+                chart::rings,
+                chart::threads,
+                chart::cursor,
+                chart::chip,
+                chart::eye,
+            )
+                .chain(),
             hud::fade_notice,
             open_pause_menu.run_if(in_state(Playing::Live)),
         )
@@ -484,7 +505,7 @@ fn apply_intent(
     inventories: Res<Inventories>,
     session: NonSend<Session>,
     mut me: ResMut<Me>,
-    mut held: ResMut<Held>,
+    held: Res<Held>,
     mut camera: Query<&mut Transform, With<Camera3d>>,
 ) {
     // A long frame (window drag, a chunk-mesh hitch) must not turn into a teleport
@@ -507,19 +528,17 @@ fn apply_intent(
         p.yaw = driven.yaw;
         p.pos = driven.seat();
         p.ride = Ride::Driving(driven);
-        pick_item(&intent, &mut held);
         aim_camera(p, &mut camera);
         return;
     }
 
     p.yaw += intent.look.x;
 
-    // How the thing in hand falls: a parachute is the hotbar cell you are on, exactly as a
+    // How the thing in hand falls: a parachute is the star the cursor is on, exactly as a
     // drill is, so opening the canopy is the d-pad and needs no button of its own.
-    let fall = inventories.of(session.me()).falling(held.0);
+    let fall = inventories.of(session.me()).falling(held.0.item());
     player::advance(&sim.0, p, &intent, fall, dt);
 
-    pick_item(&intent, &mut held);
     aim_camera(p, &mut camera);
 }
 
@@ -540,15 +559,25 @@ fn mind_the_body(me: Res<Me>, mut intent: ResMut<Intent>) {
     }
 }
 
-/// Moves the hotbar cursor. The number row reaches the first nine cells; stepping reaches
-/// every cell. A key pointed past the end of the hotbar does nothing rather than wrapping
-/// round to something the player was not aiming at.
-fn pick_item(intent: &Intent, held: &mut Held) {
-    if let Some(cell) = intent.item_pick.and_then(|slot| Item::ALL.get(slot)) {
-        held.0 = *cell;
-    }
-    if intent.item_delta != 0 {
-        held.0 = held.0.step(intent.item_delta);
+/// Hands the d-pad press to the constellation. The chart owns what a press *means* —
+/// which star is that way — and this owns nothing but which resource it lands in.
+fn reach_for_it(intent: Res<Intent>, mut reach: ResMut<chart::Reach>) {
+    reach.press = intent.reach;
+}
+
+/// The pile the chart and the rig both draw, refreshed from the authoritative one.
+///
+/// Every frame the world is up, not just while the rig is: the constellation is on screen
+/// the whole time, and a notch bar a frame behind the block you just dug is a hotbar that
+/// lies about what is in your pocket.
+fn show_the_pile(
+    session: NonSend<Session>,
+    inventories: Res<Inventories>,
+    mut stock: ResMut<Stock>,
+) {
+    let mine = inventories.of(session.me());
+    if stock.0 != *mine {
+        stock.0 = mine.clone();
     }
 }
 
@@ -583,7 +612,7 @@ fn park_or_ride(
     let holding_a_vehicle = matches!(
         inventories
             .of(session.me())
-            .in_hand(held.0)
+            .in_hand(held.0.item())
             .map(Item::class),
         Some(Class::Vehicle { .. })
     );
@@ -898,7 +927,7 @@ fn target_and_edit(
     // One table decides everything about the thing in hand: how far it works, how fast it
     // chews, and how far it zooms. There is no per-item branch below, and adding a tool
     // needs no change here at all.
-    let using = inventories.of(session.me()).using(held.0);
+    let using = inventories.of(session.me()).using(held.0.item());
     let hit = raycast::cast(&sim.0, me.0.eye(), me.0.look_dir(), using.reach);
 
     // A long frame must not be a free block: the same clamp `apply_intent` puts on motion.
@@ -935,7 +964,10 @@ fn target_and_edit(
     } else if intent.place_block {
         // Holding something that is not a block places nothing: a rifle puts nothing in
         // the world, and pretending the button is broken beats pretending it is a block.
-        held.0.places().map(|block| (hit.adjacent(), block))
+        held.0
+            .item()
+            .and_then(Item::places)
+            .map(|block| (hit.adjacent(), block))
     } else {
         None
     };
@@ -977,7 +1009,7 @@ fn aim_zoom(
     mut camera: Query<&mut Projection, With<Camera3d>>,
 ) {
     let zoom = if intent.use_item {
-        inventories.of(session.me()).using(held.0).zoom
+        inventories.of(session.me()).using(held.0.item()).zoom
     } else {
         1.0
     };
@@ -994,12 +1026,16 @@ fn aim_zoom(
     }
 }
 
-/// The local player's craft button. Like an edit, it is a *request*: the host owns every
-/// pile, so a peer asks and waits to be told what it has.
-/// The craft button in the world opens the rig, on whatever the hotbar cursor is on.
+/// The craft button: the zoom between the two halves of one map.
 ///
-/// Making a thing is one press *inside* the rig now, not one press outside it: there is
-/// one place a recipe is paid, and it is the place the recipe is drawn.
+/// The constellation is the whole item table from arm's length — where things are and what
+/// reaches them. Craft leans in: the rig comes up on the star the cursor is standing on,
+/// and says what that thing is made of and what it would cost. Same items, same colours,
+/// same rings, same d-pad. With an empty hand there is no star to lean into, so it opens on
+/// something the pile could actually pay for.
+///
+/// Making a thing is one press *inside* the rig, not one press outside it: there is one
+/// place a recipe is paid, and it is the place the recipe is drawn.
 fn open_forge(
     intent: Res<Intent>,
     held: Res<Held>,
@@ -1011,29 +1047,27 @@ fn open_forge(
     if !intent.craft {
         return;
     }
-    commands.insert_resource(forge::Forge::new(
-        held.0,
-        inventories.of(session.me()).clone(),
-    ));
+    let mine = inventories.of(session.me());
+    let focus = held
+        .0
+        .item()
+        .unwrap_or_else(|| forge::something_to_make(mine));
+    commands.insert_resource(forge::Forge::new(focus, mine.clone()));
     playing.set(Playing::Forge);
 }
 
-/// Hands the rig the pile it draws, and hides the words while it is up.
+/// Puts the chart and the crosshair away while the rig is up: the rig is the same items
+/// said at a different zoom, and two cursors on one screen is one too many.
 fn dress_the_forge(
-    session: NonSend<Session>,
-    inventories: Res<Inventories>,
-    mut stock: ResMut<forge::Stock>,
     mut hud: Query<&mut Visibility, With<hud::HudRoot>>,
+    mut sky: Query<&mut Visibility, (With<chart::ChartRoot>, Without<hud::HudRoot>)>,
 ) {
-    let mine = inventories.of(session.me());
-    if stock.0 != *mine {
-        stock.0 = mine.clone();
-    }
     hud::show(&mut hud, false);
+    chart::show(&mut sky, false);
 }
 
-/// Puts the rig's craft requests through the same door the hotbar's used: the host pays
-/// them, a peer asks the host to.
+/// Puts the rig's craft requests through the same door the world's crafting used: the host
+/// pays them, a peer asks the host to.
 fn submit_forge_crafts(
     role: Res<NetRole>,
     session: NonSend<Session>,
@@ -1054,15 +1088,18 @@ fn close_forge(nav: Res<forge::Nav>, mut playing: ResMut<NextState<Playing>>) {
     }
 }
 
-/// Back to the world: the rig goes away and the words come back.
+/// Back to the world: the rig goes away and the chart comes back, with whatever was just
+/// built now lit on it.
 fn undress_the_forge(
     mut commands: Commands,
     rig: Query<Entity, With<forge::Rig>>,
     mut hud: Query<&mut Visibility, With<hud::HudRoot>>,
+    mut sky: Query<&mut Visibility, (With<chart::ChartRoot>, Without<hud::HudRoot>)>,
     mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
     forge::leave(commands.reborrow(), rig);
     hud::show(&mut hud, true);
+    chart::show(&mut sky, true);
     grab_mouse(&mut cursor, true);
 }
 
@@ -1497,7 +1534,7 @@ fn net_send_pose(
 ) {
     // What is in the hand, not what the cursor is on: the same question the use button
     // asks, so the cube everyone else sees is the thing that just broke their wall.
-    let holding = inventories.of(session.me()).in_hand(held.0);
+    let holding = inventories.of(session.me()).in_hand(held.0.item());
     session.send(
         Target::All,
         Msg::Pose {

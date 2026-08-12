@@ -5,7 +5,7 @@
 //! Everything downstream reads [`Intent`] and never asks which device the player used, so
 //! remapping is a change to [`KEYS`] / [`PAD`] and nothing else.
 
-use crate::registry::HOTBAR_COLUMNS;
+use crate::chart::Dir;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 
@@ -42,13 +42,13 @@ pub struct KeyBinds {
     pub craft: KeyCode,
     /// Gets into the car in front of you, and back out of it again.
     pub ride: KeyCode,
-    /// Step the hotbar cursor one cell.
-    pub prev_item: KeyCode,
-    pub next_item: KeyCode,
-    /// Picks a hotbar cell outright, the first cell first. The number row runs out long
-    /// before the hotbar does, which is why stepping exists: a new item needs a table row,
-    /// never a free key.
-    pub slots: [KeyCode; 9],
+    /// The four directions: one press, one step along the constellation. The whole of
+    /// picking a thing up, and the whole of walking the crafting rig — there is one
+    /// direction pad in this game and it means the same thing wherever it is pressed.
+    pub code_up: KeyCode,
+    pub code_right: KeyCode,
+    pub code_down: KeyCode,
+    pub code_left: KeyCode,
 }
 
 pub const KEYS: KeyBinds = KeyBinds {
@@ -65,19 +65,10 @@ pub const KEYS: KeyBinds = KeyBinds {
     place_block: MouseButton::Right,
     craft: KeyCode::KeyC,
     ride: KeyCode::KeyR,
-    prev_item: KeyCode::KeyQ,
-    next_item: KeyCode::KeyE,
-    slots: [
-        KeyCode::Digit1,
-        KeyCode::Digit2,
-        KeyCode::Digit3,
-        KeyCode::Digit4,
-        KeyCode::Digit5,
-        KeyCode::Digit6,
-        KeyCode::Digit7,
-        KeyCode::Digit8,
-        KeyCode::Digit9,
-    ],
+    code_up: KeyCode::ArrowUp,
+    code_right: KeyCode::ArrowRight,
+    code_down: KeyCode::ArrowDown,
+    code_left: KeyCode::ArrowLeft,
 };
 
 /// Gamepad bindings, named for the Deck's face labels.
@@ -100,13 +91,13 @@ pub struct PadBinds {
     pub sprint: GamepadButton,
     /// L1 — hold to descend while flying
     pub descend: GamepadButton,
-    /// The hotbar cursor: left and right walk it a cell at a time, up and down jump a
-    /// whole row. Two rows of seven are reachable in at most four presses, which is what
-    /// keeps a growing item table from turning into a long press-and-hold.
-    pub next_item: GamepadButton,
-    pub prev_item: GamepadButton,
-    pub next_row: GamepadButton,
-    pub prev_row: GamepadButton,
+    /// The d-pad, which is the whole of choosing anything: one press is one step along the
+    /// constellation, and an item's code is which presses. Nothing in the game is more
+    /// than two of them from an empty hand.
+    pub up: GamepadButton,
+    pub right: GamepadButton,
+    pub down: GamepadButton,
+    pub left: GamepadButton,
     /// Start — opens the pause menu, where quitting and sharing this world's ticket
     /// live. It used to take a two-button chord to quit, which nobody who had not read
     /// the source could find; a menu you can see is worth more than a chord you cannot
@@ -123,12 +114,50 @@ pub const PAD: PadBinds = PadBinds {
     place_block: GamepadButton::LeftTrigger2,
     sprint: GamepadButton::RightTrigger,
     descend: GamepadButton::LeftTrigger,
-    next_item: GamepadButton::DPadRight,
-    prev_item: GamepadButton::DPadLeft,
-    next_row: GamepadButton::DPadDown,
-    prev_row: GamepadButton::DPadUp,
+    up: GamepadButton::DPadUp,
+    right: GamepadButton::DPadRight,
+    down: GamepadButton::DPadDown,
+    left: GamepadButton::DPadLeft,
     pause: GamepadButton::Start,
 };
+
+impl PadBinds {
+    /// The button each direction is, so everything that reads the pad reads it the one way.
+    fn button(&self, dir: Dir) -> GamepadButton {
+        match dir {
+            Dir::Up => self.up,
+            Dir::Right => self.right,
+            Dir::Down => self.down,
+            Dir::Left => self.left,
+        }
+    }
+}
+
+impl KeyBinds {
+    /// The arrow key each direction is. Named apart from the walking keys because on a
+    /// keyboard the two are different hands: `WASD` moves the body, the arrows punch codes.
+    fn key(&self, dir: Dir) -> KeyCode {
+        match dir {
+            Dir::Up => self.code_up,
+            Dir::Right => self.code_right,
+            Dir::Down => self.code_down,
+            Dir::Left => self.code_left,
+        }
+    }
+}
+
+/// The one direction pressed this frame, if any — from the keyboard's arrows or the pad's
+/// d-pad, folded together.
+///
+/// One direction and not a set: a code is a sequence of presses, and two directions
+/// arriving on the same frame is a thumb rolling across the pad, not a request to be in two
+/// places. Taking the first in [`Dir::ALL`] order makes that thumb-roll one honest step
+/// rather than two.
+fn pressed(keys: &ButtonInput<KeyCode>, pads: &Query<&Gamepad>) -> Option<Dir> {
+    Dir::ALL
+        .into_iter()
+        .find(|dir| keys.just_pressed(KEYS.key(*dir)) || tapped(pads, PAD.button(*dir)))
+}
 
 /// What the player asked for this frame, device-independent.
 #[derive(Resource, Default, Debug, Clone, Copy)]
@@ -146,10 +175,9 @@ pub struct Intent {
     /// break.
     pub use_item: bool,
     pub place_block: bool,
-    /// Hotbar cursor movement, in cells. A row is [`HOTBAR_COLUMNS`] of them.
-    pub item_delta: i32,
-    /// An absolute hotbar cell, from the number-row keys.
-    pub item_pick: Option<usize>,
+    /// One step along the constellation: the press itself, which is one symbol of an
+    /// item's code.
+    pub reach: Option<Dir>,
     /// Make one of whatever the cursor is on.
     pub craft: bool,
     /// Get into your car, or out of it. Tapped: held, it would be a door flapping.
@@ -230,13 +258,6 @@ pub fn gather_intent(
     out.craft = keys.just_pressed(KEYS.craft);
     out.ride = keys.just_pressed(KEYS.ride);
     out.pause = keys.just_pressed(KEYS.pause);
-    out.item_delta =
-        keys.just_pressed(KEYS.next_item) as i32 - keys.just_pressed(KEYS.prev_item) as i32;
-    for (slot, key) in KEYS.slots.iter().enumerate() {
-        if keys.just_pressed(*key) {
-            out.item_pick = Some(slot);
-        }
-    }
 
     // The pads, folded into one — see [`tapped`]. The Deck's built-in controls are one of
     // them.
@@ -251,9 +272,7 @@ pub fn gather_intent(
     out.place_block |= tapped(&pads, PAD.place_block);
     out.craft |= tapped(&pads, PAD.craft);
     out.ride |= tapped(&pads, PAD.ride);
-    out.item_delta += tapped(&pads, PAD.next_item) as i32 - tapped(&pads, PAD.prev_item) as i32;
-    out.item_delta += (tapped(&pads, PAD.next_row) as i32 - tapped(&pads, PAD.prev_row) as i32)
-        * HOTBAR_COLUMNS as i32;
+    out.reach = pressed(&keys, &pads);
     out.pause |= tapped(&pads, PAD.pause);
 
     out.walk = out.walk.clamp_length_max(1.0);
@@ -279,7 +298,7 @@ pub fn gather_menu_intent(
 
     // Folded across the pads, exactly as gameplay input is — a menu that moved two rows
     // per press on the TV would be the same bug wearing a different hat.
-    out.step += tapped(&pads, PAD.next_row) as i32 - tapped(&pads, PAD.prev_row) as i32;
+    out.step += tapped(&pads, PAD.down) as i32 - tapped(&pads, PAD.up) as i32;
     out.confirm |= tapped(&pads, PAD.jump);
     // B backs out, and so does Start — whichever button opened this, the same one and the
     // obvious one both close it.
@@ -319,9 +338,8 @@ pub fn gather_forge_nav(
     };
 
     for pad in &pads {
-        out.across +=
-            pad.just_pressed(PAD.next_item) as i32 - pad.just_pressed(PAD.prev_item) as i32;
-        out.down += pad.just_pressed(PAD.next_row) as i32 - pad.just_pressed(PAD.prev_row) as i32;
+        out.across += pad.just_pressed(PAD.right) as i32 - pad.just_pressed(PAD.left) as i32;
+        out.down += pad.just_pressed(PAD.down) as i32 - pad.just_pressed(PAD.up) as i32;
         out.focus |= pad.just_pressed(PAD.jump);
         out.craft |= pad.just_pressed(PAD.craft);
         out.leave |= pad.just_pressed(PAD.ride) || pad.just_pressed(PAD.pause);
@@ -365,36 +383,42 @@ mod tests {
     }
 
     /// Presses `button` on every pad at once, as two devices wrapping one controller do,
-    /// and reports what the hotbar was asked to do about it.
-    fn press(app: &mut App, pads: &[Entity], button: GamepadButton) -> i32 {
+    /// and reports which way the chart was asked to step.
+    fn press(app: &mut App, pads: &[Entity], button: GamepadButton) -> Option<Dir> {
         for pad in pads {
             app.world_mut().write_message(RawGamepadEvent::Button(
                 RawGamepadButtonChangedEvent::new(*pad, button, 1.0),
             ));
         }
         app.update();
-        app.world().resource::<Intent>().item_delta
+        app.world().resource::<Intent>().reach
     }
 
     /// The TV bug: Steam Input's virtual pad and the controller it wraps both report the
-    /// press, and the hotbar cursor moved two cells for one thumb. One press is one cell,
-    /// however many devices saw it — and a row jump is one row, not two.
+    /// press, and the cursor moved two cells for one thumb. One press is one step, however
+    /// many devices saw it — which is now true by construction, since a step is a
+    /// *direction* and not a count that could be added up twice.
     #[test]
-    fn one_press_moves_the_hotbar_one_cell_however_many_pads_report_it() {
+    fn one_press_is_one_step_however_many_pads_report_it() {
         for pads in [1, 2, 3] {
-            let (mut app, ids) = with_pads(pads);
-            assert_eq!(
-                press(&mut app, &ids, PAD.next_item),
-                1,
-                "{pads} pad(s) reporting one press"
-            );
-            let (mut app, ids) = with_pads(pads);
-            assert_eq!(
-                press(&mut app, &ids, PAD.next_row),
-                HOTBAR_COLUMNS as i32,
-                "{pads} pad(s) reporting one row jump"
-            );
+            for (button, dir) in [(PAD.right, Dir::Right), (PAD.down, Dir::Down)] {
+                let (mut app, ids) = with_pads(pads);
+                assert_eq!(
+                    press(&mut app, &ids, button),
+                    Some(dir),
+                    "{pads} pad(s) reporting one press"
+                );
+            }
         }
+    }
+
+    /// Nothing pressed is nothing asked for: a chart that stepped on an idle frame would
+    /// walk itself across the sky while the player was digging.
+    #[test]
+    fn an_untouched_pad_asks_for_nothing() {
+        let (mut app, _) = with_pads(2);
+        app.update();
+        assert_eq!(app.world().resource::<Intent>().reach, None);
     }
 
     #[test]

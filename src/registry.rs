@@ -10,14 +10,14 @@
 //! the ones a player can talk about are exactly the ones they can hold.
 //!
 //! The two meet in [`Class::Block`]: an item of that class is a voxel you place, and it
-//! takes its colour from the voxel, so a hotbar cell can never disagree with what it puts
+//! takes its colour from the voxel, so a star on the chart can never disagree with what it puts
 //! in the world. Everything else — tools, components, equippables, vehicles — is an item
 //! and nothing more.
 //!
 //! **Adding content is a localised diff.** A new block: a [`Block`] variant, a [`Block::def`]
 //! arm, and — if a player gets to place it — an [`Item`] variant, an [`Item::def`] arm, and
 //! an [`Item::ALL`] entry. A new craftable thing: the item half alone, with a recipe.
-//! Nothing outside this file has to change; the hotbar, the crafting UI and the wire all
+//! Nothing outside this file has to change; the constellation, the crafting rig and the wire all
 //! read these tables.
 
 use serde::{Deserialize, Serialize};
@@ -185,22 +185,6 @@ impl Use {
         speed: 2.0,
         zoom: 1.0,
     };
-
-    /// How this reads on the HUD, or nothing for a bare hand — a player holding a nail is
-    /// told about the nail, not about their arm.
-    pub fn summary(self) -> Option<String> {
-        if self.reach > Use::BARE_HAND.reach {
-            let scope = if self.zoom > 1.0 { ", scoped" } else { "" };
-            Some(format!("shoots {:.0} blocks{scope}", self.reach))
-        } else if self.speed > Use::BARE_HAND.speed {
-            Some(format!(
-                "digs {}x",
-                round(self.speed / Use::BARE_HAND.speed)
-            ))
-        } else {
-            None
-        }
-    }
 }
 
 /// What wearing a thing does to a fall — the behaviour dimension of the equippables, and
@@ -230,35 +214,6 @@ impl Fall {
         max_speed: 55.0,
         drift: 1.0,
     };
-
-    /// How this reads on the HUD, or nothing for an ordinary fall — a player holding a nail
-    /// is told about the nail, not about gravity.
-    ///
-    /// Read off both numbers, as [`Use::summary`] is off reach and speed, so an equippable
-    /// that only slows a fall or only steers one still says what it does. A row whose words
-    /// were one hardcoded string would let the next one change the physics under a player
-    /// and tell them nothing.
-    pub fn summary(self) -> Option<String> {
-        let words = match (
-            self.max_speed < Fall::UNAIDED.max_speed,
-            self.drift > Fall::UNAIDED.drift,
-        ) {
-            (true, true) => "floats down and steers",
-            (true, false) => "floats down",
-            (false, true) => "steers as you fall",
-            (false, false) => return None,
-        };
-        Some(words.to_string())
-    }
-}
-
-/// `2.5` as "2.5" and `4.0` as "4": a whole number of times faster is written as one.
-fn round(x: f32) -> String {
-    if (x - x.round()).abs() < 0.05 {
-        format!("{x:.0}")
-    } else {
-        format!("{x:.1}")
-    }
 }
 
 /// What an item *is*.
@@ -286,20 +241,7 @@ pub enum Class {
     Vehicle { color: [f32; 3] },
 }
 
-impl Class {
-    /// The word the HUD shows under an item's name.
-    pub fn word(self) -> &'static str {
-        match self {
-            Class::Block(_) => "block",
-            Class::Tool { .. } => "tool",
-            Class::Component { .. } => "part",
-            Class::Equippable { .. } => "wearable",
-            Class::Vehicle { .. } => "vehicle",
-        }
-    }
-}
-
-/// Everything a player can hold, in hotbar order.
+/// Everything a player can hold, in the order the constellation lays them out.
 ///
 /// Wire ids are declaration indices, exactly as for [`Block`] — **append new variants at
 /// the end**, or an older peer decodes a rifle as a hammer. `items_are_declaration_order`
@@ -338,12 +280,10 @@ struct ItemDef {
 /// Nothing: the recipe of a thing you gather rather than make.
 const GATHERED: &[(Item, u32)] = &[];
 
-/// Hotbar cells per row — the width the HUD lays the hotbar out in, and the step the
-/// d-pad's up and down take through it. One number so the two cannot disagree.
-pub const HOTBAR_COLUMNS: usize = 7;
-
 impl Item {
-    /// Every item, in hotbar order. `all_lists_every_item` is what keeps it complete.
+    /// Every item, in the order [`crate::chart`] hands out d-pad codes in — so an item
+    /// appended here takes the next free exit on the chart and moves nobody else's code.
+    /// `all_lists_every_item` is what keeps it complete.
     pub const ALL: &'static [Item] = &[
         Item::Grass,
         Item::Dirt,
@@ -521,21 +461,6 @@ impl Item {
         }
     }
 
-    /// What this does, in the words the HUD puts beside its name — off whichever dimension
-    /// of the table its class actually has.
-    ///
-    /// One accessor rather than a caller asking each dimension in turn: what a player is
-    /// told a thing does has to come from the same row the thing obeys, and a class with no
-    /// behaviour says nothing rather than something reassuring.
-    pub fn summary(self) -> Option<String> {
-        match self.class() {
-            Class::Block(b) => b.soft().then(|| "soft to land on".to_string()),
-            Class::Tool { using, .. } => using.summary(),
-            Class::Equippable { falling, .. } => falling.summary(),
-            Class::Component { .. } | Class::Vehicle { .. } => None,
-        }
-    }
-
     /// What one of these costs to make, or empty for something you gather.
     pub fn recipe(self) -> &'static [(Item, u32)] {
         self.def().recipe
@@ -577,16 +502,9 @@ impl Item {
         Item::ALL.iter().copied().find(|i| i.name() == name)
     }
 
-    /// Position in [`Item::ALL`] — the hotbar cursor's coordinate, and the wire id.
+    /// Position in [`Item::ALL`] — where it lands on the chart, and the wire id.
     pub fn index(self) -> usize {
         self as usize
-    }
-
-    /// The item `steps` along the hotbar from this one, wrapping. Moving by
-    /// [`HOTBAR_COLUMNS`] is a row; moving by one is a cell.
-    pub fn step(self, steps: i32) -> Item {
-        let n = Item::COUNT as i32;
-        Item::ALL[(self.index() as i32 + steps).rem_euclid(n) as usize]
     }
 }
 
@@ -764,8 +682,8 @@ mod tests {
             assert_eq!(
                 item.using() != Use::BARE_HAND,
                 is_tool,
-                "{item:?} is a {} that {}",
-                item.class().word(),
+                "{item:?} is a {:?} that {}",
+                item.class(),
                 if is_tool { "does nothing" } else { "acts" }
             );
         }
@@ -808,8 +726,8 @@ mod tests {
             assert_eq!(
                 item.falling() != Fall::UNAIDED,
                 is_worn,
-                "{item:?} is a {} that {}",
-                item.class().word(),
+                "{item:?} is a {:?} that {}",
+                item.class(),
                 if is_worn {
                     "falls like a stone"
                 } else {
@@ -885,36 +803,5 @@ mod tests {
     fn the_scope_narrows_the_view() {
         assert!(Item::Rifle.using().zoom > 2.0);
         assert_eq!(Use::BARE_HAND.zoom, 1.0, "a hand does not zoom");
-    }
-
-    /// What the HUD says about each thing, which is the only place a player is told what
-    /// the button in their hand does.
-    #[test]
-    fn a_tool_says_what_it_does() {
-        assert_eq!(Item::Nail.summary(), None, "a nail is not a tool");
-        assert_eq!(Item::Grass.summary(), None);
-        assert_eq!(Item::Hammer.summary().unwrap(), "digs 2.5x");
-        assert_eq!(Item::Drill.summary().unwrap(), "digs 4x");
-        assert_eq!(Item::Handgun.summary().unwrap(), "shoots 24 blocks");
-        assert_eq!(Item::Rifle.summary().unwrap(), "shoots 64 blocks, scoped");
-        assert_eq!(Item::Cushion.summary().unwrap(), "soft to land on");
-        assert_eq!(Item::Parachute.summary().unwrap(), "floats down and steers");
-        assert_eq!(Item::Car.summary(), None, "a car is not about falling");
-    }
-
-    #[test]
-    fn the_hotbar_wraps_in_both_directions() {
-        assert_eq!(Item::Grass.step(1), Item::Dirt);
-        assert_eq!(
-            Item::Grass.step(-1),
-            Item::Car,
-            "off the front, round the back"
-        );
-        assert_eq!(Item::Grass.step(Item::COUNT as i32), Item::Grass);
-        assert_eq!(
-            Item::Grass.step(HOTBAR_COLUMNS as i32),
-            Item::ALL[HOTBAR_COLUMNS],
-            "down is a row"
-        );
     }
 }

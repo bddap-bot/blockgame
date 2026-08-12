@@ -27,9 +27,10 @@
 use bevy::prelude::*;
 use std::collections::HashMap;
 
-use crate::avatar::{self, Palette, Part, Skin, part};
-use crate::inventory::Inventory;
-use crate::registry::{Class, Item};
+use crate::avatar::Palette;
+use crate::icons;
+use crate::inventory::{Inventory, Stock};
+use crate::registry::Item;
 
 /// Where the rig is built, far above any world: the game's own camera stops at 1200
 /// blocks, so the two scenes cannot see each other and neither needs a render layer to
@@ -69,14 +70,6 @@ pub struct Nav {
     /// Back to the world.
     pub leave: bool,
 }
-
-/// The pile the rig draws, as its owner last stated it.
-///
-/// A copy rather than a borrow of the authoritative [`crate::inventory::Inventories`]:
-/// the rig is a picture of somebody's things and never the record of them, and one-way
-/// means a drawing bug can never become a pile bug. The game refreshes it each frame.
-#[derive(Resource, Default)]
-pub struct Stock(pub Inventory);
 
 /// Crafts the player has asked for and nobody has answered yet.
 ///
@@ -316,141 +309,21 @@ pub fn next_step(stock: &Inventory, want: Item) -> Option<Item> {
         .find_map(|(part, _)| next_step(stock, *part))
 }
 
-// ---------------------------------------------------------------------------
-// The silhouettes — what makes a nail read as a nail with no label under it.
-// ---------------------------------------------------------------------------
-
-/// A blank cube, for anything whose whole identity is its colour: the blocks, which the
-/// player has already been digging up all afternoon and knows on sight.
-const BLOCK: &[Part] = &[part(
-    Skin::Paint(Item::Grass),
-    [1.0, 1.0, 1.0],
-    [0.0, 0.0, 0.0],
-)];
-
-const NAIL: &[Part] = &[
-    part(Skin::Paint(Item::Nail), [0.5, 0.13, 0.5], [0.0, 0.44, 0.0]),
-    part(Skin::Paint(Item::Nail), [0.16, 0.7, 0.16], [0.0, 0.04, 0.0]),
-    part(
-        Skin::Paint(Item::Nail),
-        [0.07, 0.2, 0.07],
-        [0.0, -0.38, 0.0],
-    ),
-];
-
-const HAMMER: &[Part] = &[
-    part(
-        Skin::Paint(Item::Hammer),
-        [0.17, 0.95, 0.17],
-        [0.0, -0.13, 0.0],
-    ),
-    part(Skin::Gear, [0.78, 0.28, 0.30], [0.0, 0.42, 0.0]),
-    part(Skin::Gear, [0.22, 0.20, 0.34], [-0.44, 0.30, 0.0]),
-];
-
-const DRILL: &[Part] = &[
-    part(
-        Skin::Paint(Item::Drill),
-        [0.56, 0.52, 0.44],
-        [0.0, 0.28, 0.0],
-    ),
-    part(
-        Skin::Paint(Item::Drill),
-        [0.20, 0.30, 0.20],
-        [0.0, 0.62, 0.0],
-    ),
-    part(Skin::Gear, [0.30, 0.26, 0.26], [0.0, -0.06, 0.0]),
-    part(Skin::Gear, [0.19, 0.24, 0.19], [0.0, -0.28, 0.0]),
-    part(Skin::Dark, [0.10, 0.22, 0.10], [0.0, -0.48, 0.0]),
-];
-
-const HANDGUN: &[Part] = &[
-    part(
-        Skin::Paint(Item::Handgun),
-        [0.92, 0.22, 0.16],
-        [0.06, 0.24, 0.0],
-    ),
-    part(
-        Skin::Paint(Item::Handgun),
-        [0.24, 0.52, 0.16],
-        [-0.26, -0.16, 0.0],
-    ),
-    part(Skin::Gear, [0.14, 0.12, 0.10], [-0.05, 0.06, 0.0]),
-];
-
-const RIFLE: &[Part] = &[
-    part(
-        Skin::Paint(Item::Rifle),
-        [1.30, 0.14, 0.13],
-        [0.10, 0.12, 0.0],
-    ),
-    part(
-        Skin::Paint(Item::Rifle),
-        [0.40, 0.30, 0.15],
-        [-0.48, -0.04, 0.0],
-    ),
-    part(
-        Skin::Paint(Item::Rifle),
-        [0.20, 0.34, 0.14],
-        [-0.16, -0.18, 0.0],
-    ),
-    part(Skin::Dark, [0.34, 0.11, 0.11], [0.16, 0.28, 0.0]),
-    part(Skin::Gear, [0.08, 0.10, 0.08], [0.30, 0.30, 0.0]),
-];
-
-const PARACHUTE: &[Part] = &[
-    part(
-        Skin::Paint(Item::Parachute),
-        [0.92, 0.20, 0.50],
-        [0.0, 0.40, 0.0],
-    ),
-    part(
-        Skin::Paint(Item::Parachute),
-        [0.60, 0.18, 0.40],
-        [0.0, 0.56, 0.0],
-    ),
-    part(
-        Skin::Paint(Item::Parachute),
-        [0.24, 0.14, 0.28],
-        [0.0, 0.68, 0.0],
-    ),
-    part(Skin::Dark, [0.04, 0.52, 0.04], [-0.36, 0.02, 0.0]),
-    part(Skin::Dark, [0.04, 0.52, 0.04], [0.36, 0.02, 0.0]),
-    part(Skin::Gear, [0.32, 0.24, 0.24], [0.0, -0.34, 0.0]),
-];
-
-/// What one item looks like on the rig, and how big to draw the table.
+/// What the rig opens on when the craft button is pressed with an empty hand: the first
+/// thing the pile would pay for right now, or — with nothing affordable — the first thing
+/// there is to make at all.
 ///
-/// The car is the game's own car — the one the player drives — shrunk onto a shelf,
-/// because the strongest possible label for "this makes a car" is a car.
-fn icon(item: Item) -> (&'static [Part], f32, f32) {
-    match item.class() {
-        Class::Block(_) => (BLOCK, 1.0, 0.0),
-        Class::Component { .. } => (NAIL, 1.0, 0.0),
-        Class::Equippable { .. } => (PARACHUTE, 1.0, 0.0),
-        // Every part table is written about its own feet, and the car's is the game's:
-        // it is lifted by half its height so it hangs on the string like everything else.
-        Class::Vehicle { .. } => (avatar::CAR, 0.54, -0.42),
-        Class::Tool { .. } => match item {
-            Item::Drill => (DRILL, 1.0, 0.0),
-            Item::Handgun => (HANDGUN, 1.0, 0.0),
-            Item::Rifle => (RIFLE, 1.0, 0.0),
-            _ => (HAMMER, 1.0, 0.0),
-        },
-    }
-}
-
-/// The silhouette tables are written for one item each, so the colour in them is that
-/// item's. Re-skinning them per node is what lets one table draw every block.
-fn repaint(p: &Part, as_item: Item) -> Part {
-    Part {
-        skin: match p.skin {
-            Skin::Paint(_) => Skin::Paint(as_item),
-            other => other,
-        },
-        size: p.size,
-        at: p.at,
-    }
+/// The hand is a place on the constellation like any other, so the button has to mean
+/// something there too, and the useful thing to show somebody holding nothing is what
+/// their afternoon of digging has already bought them.
+pub fn something_to_make(stock: &Inventory) -> Item {
+    let craftable = |item: &&Item| !item.recipe().is_empty();
+    Item::ALL
+        .iter()
+        .find(|item| stock.can_craft(**item))
+        .or_else(|| Item::ALL.iter().find(craftable))
+        .copied()
+        .unwrap_or(Item::ALL[0])
 }
 
 // ---------------------------------------------------------------------------
@@ -754,7 +627,7 @@ pub fn rebuild(
 
     for node in &graph.nodes {
         let scale = if node.item == middle { 1.25 } else { 0.92 };
-        let (parts, model_scale, lift) = icon(node.item);
+        let (parts, model_scale, lift) = icons::icon(node.item);
         let body = commands
             .spawn((
                 Rig,
@@ -770,7 +643,7 @@ pub fn rebuild(
             .id();
         commands.entity(body).with_children(|model| {
             for p in parts {
-                let p = repaint(p, node.item);
+                let p = icons::repaint(p, node.item);
                 model.spawn((
                     Mesh3d(kit.palette.cube()),
                     MeshMaterial3d(kit.palette.paint(p.skin)),
@@ -1134,6 +1007,18 @@ mod tests {
             "the nails get made first, one press each"
         );
         assert_eq!(made.last(), Some(&Item::Car), "and the car last");
+    }
+
+    /// The craft button with an empty hand: the rig opens on something the pile can
+    /// actually pay for, and on the first thing there is to make when it cannot pay for
+    /// anything — never on a block you dig up, which has no recipe to show.
+    #[test]
+    fn an_empty_hand_opens_the_rig_on_something_worth_seeing() {
+        let mut stock = Inventory::default();
+        assert_eq!(something_to_make(&stock), Item::Cushion, "the first recipe");
+        stock.add(Item::Stone, 1);
+        assert_eq!(something_to_make(&stock), Item::Nail, "one stone, one nail");
+        assert!(!something_to_make(&stock).recipe().is_empty());
     }
 
     /// A chain that bottoms out on something you have to dig up asks for nothing, rather

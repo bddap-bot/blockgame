@@ -12,6 +12,7 @@
 use bevy::prelude::Resource;
 use std::collections::HashMap;
 
+use crate::chart::At;
 use crate::net::PlayerId;
 use crate::registry::{Fall, Item, Use};
 
@@ -84,19 +85,19 @@ impl Inventory {
     /// what a car costs — so pointing at one is not holding one. Everything that asks
     /// "what are they holding" asks here: the model in their hand, and the behaviour of
     /// the use button, must agree.
-    pub fn in_hand(&self, selected: Item) -> Option<Item> {
-        Some(selected).filter(|item| self.count(*item) > 0)
+    pub fn in_hand(&self, selected: Option<Item>) -> Option<Item> {
+        selected.filter(|item| self.count(*item) > 0)
     }
 
     /// What the use button does for this player. A hand, unless they are holding a tool.
-    pub fn using(&self, selected: Item) -> Use {
+    pub fn using(&self, selected: Option<Item>) -> Use {
         self.in_hand(selected).map_or(Use::BARE_HAND, Item::using)
     }
 
     /// How this player falls. Bare, unless they are actually holding an equippable — a
     /// parachute they have not built yet must not break the fall off the tower they built
     /// instead of building it.
-    pub fn falling(&self, selected: Item) -> Fall {
+    pub fn falling(&self, selected: Option<Item>) -> Fall {
         self.in_hand(selected).map_or(Fall::UNAIDED, Item::falling)
     }
 
@@ -154,18 +155,25 @@ impl Inventories {
     }
 }
 
-/// Which item the local player has selected — the hotbar cursor.
+/// Where the local player's cursor stands on the constellation: on a star, or back in
+/// their own empty hand.
 ///
-/// Separate from the inventory because you may point at something you have none of: that
-/// is how you read its recipe and decide to make one.
-#[derive(Resource, Debug, Clone, Copy)]
-pub struct Held(pub Item);
+/// Separate from the inventory because you may point at something you have none of — that
+/// is how you read its recipe and decide to make one — and empty-handed is a *place* on
+/// the chart rather than an absence, which is what lets putting a thing down be a press of
+/// the d-pad like every other selection.
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct Held(pub At);
 
-impl Default for Held {
-    fn default() -> Self {
-        Held(Item::ALL[0])
-    }
-}
+/// The local player's pile, as the two surfaces that draw it last saw it.
+///
+/// A copy rather than a borrow of the authoritative [`Inventories`]: the chart and the rig
+/// are pictures of somebody's things and never the record of them, and one-way means a
+/// drawing bug can never become a pile bug. The game refreshes it each frame, and both
+/// surfaces read this one — so the bar beside a star and the beads on a string cannot
+/// disagree about what is in the pocket.
+#[derive(Resource, Default)]
+pub struct Stock(pub Inventory);
 
 #[cfg(test)]
 mod tests {
@@ -257,12 +265,12 @@ mod tests {
     #[test]
     fn pointing_at_a_rifle_is_not_holding_one() {
         let mut inv = Inventory::default();
-        assert_eq!(inv.in_hand(Item::Rifle), None);
-        assert_eq!(inv.using(Item::Rifle), Use::BARE_HAND);
+        assert_eq!(inv.in_hand(Some(Item::Rifle)), None);
+        assert_eq!(inv.using(Some(Item::Rifle)), Use::BARE_HAND);
 
         inv.add(Item::Rifle, 1);
-        assert_eq!(inv.in_hand(Item::Rifle), Some(Item::Rifle));
-        assert_eq!(inv.using(Item::Rifle), Item::Rifle.using());
+        assert_eq!(inv.in_hand(Some(Item::Rifle)), Some(Item::Rifle));
+        assert_eq!(inv.using(Some(Item::Rifle)), Item::Rifle.using());
     }
 
     /// The same rule as the rifle's, on the way down: a parachute you have not built is a
@@ -271,12 +279,15 @@ mod tests {
     #[test]
     fn pointing_at_a_parachute_is_not_holding_one() {
         let mut inv = Inventory::default();
-        assert_eq!(inv.falling(Item::Parachute), Fall::UNAIDED);
+        assert_eq!(inv.falling(Some(Item::Parachute)), Fall::UNAIDED);
 
         inv.add(Item::Parachute, 1);
-        assert_eq!(inv.falling(Item::Parachute), Item::Parachute.falling());
         assert_eq!(
-            inv.falling(Item::Rifle),
+            inv.falling(Some(Item::Parachute)),
+            Item::Parachute.falling()
+        );
+        assert_eq!(
+            inv.falling(Some(Item::Rifle)),
             Fall::UNAIDED,
             "owning one is not holding it either"
         );
