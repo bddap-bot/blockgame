@@ -19,7 +19,7 @@
 //! and by the bar beside each node — one notch per one you own, so crafting makes a
 //! visible thing grow. The only text in the mode is none.
 //!
-//! **What this module does not know.** It draws [`Stock`] and it asks for crafts by
+//! **What this module does not know.** It draws [`crate::rig::Stock`] and it asks for crafts by
 //! pushing to [`CraftRequests`]. Whose pile that is, and who is allowed to say a craft
 //! happened, stays with the host in [`crate::game`] — so the same rig runs in the game,
 //! where the host answers, and under `blockgame craft-film`, where a test harness does.
@@ -31,7 +31,7 @@ use crate::avatar::Palette;
 use crate::belt::{self, Belt};
 use crate::inventory::{Held, Inventory};
 use crate::registry::Item;
-use crate::rig::{self, Dir, Kit};
+use crate::rig::{self, Dir, Kit, Stock};
 
 /// Where the rig is built, far above any world: the game's own camera stops at 1200
 /// blocks, so the two scenes cannot see each other and neither needs a render layer to
@@ -69,14 +69,6 @@ pub struct Nav {
     /// Back to the world.
     pub leave: bool,
 }
-
-/// The pile the rig draws, as its owner last stated it.
-///
-/// A copy rather than a borrow of the authoritative [`crate::inventory::Inventories`]:
-/// the rig is a picture of somebody's things and never the record of them, and one-way
-/// means a drawing bug can never become a pile bug. The game refreshes it each frame.
-#[derive(Resource, Default)]
-pub struct Stock(pub Inventory);
 
 /// Crafts the player has asked for and nobody has answered yet.
 ///
@@ -510,8 +502,7 @@ pub fn rebuild(
     }
 
     for node in &graph.nodes {
-        let scale = if node.item == middle { 1.25 } else { 0.92 };
-        let body = rig::silhouette(
+        rig::silhouette(
             &mut commands,
             &palette,
             node.item,
@@ -526,9 +517,6 @@ pub fn rebuild(
                 },
             ),
         );
-        commands
-            .entity(body)
-            .insert(Transform::from_translation(ORIGIN + node.at).with_scale(Vec3::splat(scale)));
 
         // The notch bar: how many of this you own, as a height rather than a number.
         rig::notch_bar(

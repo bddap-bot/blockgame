@@ -133,7 +133,7 @@ pub fn run(out: PathBuf, frames: u32) -> anyhow::Result<()> {
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
             1.0 / FPS as f64,
         )))
-        .insert_resource(forge::Stock(starting_stock()))
+        .insert_resource(rig::Stock(starting_stock()))
         .insert_resource(Held(Item::Grass))
         .init_state::<Stage>()
         .init_resource::<Belt>()
@@ -145,8 +145,8 @@ pub fn run(out: PathBuf, frames: u32) -> anyhow::Result<()> {
             last: frames,
         })
         .add_systems(Startup, (scenery, rig::setup, belt::enter).chain())
-        .add_systems(OnEnter(Stage::Forge), (forge::enter, shut_the_belt))
-        .add_systems(OnExit(Stage::Forge), fold_the_forge_away)
+        .add_systems(OnEnter(Stage::Forge), (forge::enter, belt::shut))
+        .add_systems(OnExit(Stage::Forge), (forge::leave, belt::open))
         // One chain, so the order is the order it is written in. The script's thumb is
         // outside both rooms and runs in either — a `press` that only ran in the room it
         // started in would leave the film pressing nothing from the moment it walked into
@@ -287,7 +287,7 @@ fn scenery(
 #[allow(clippy::too_many_arguments)]
 fn press(
     film: Res<Film>,
-    stock: Res<forge::Stock>,
+    stock: Res<rig::Stock>,
     stage: Res<State<Stage>>,
     mut nav: ResMut<forge::Nav>,
     mut belt: ResMut<Belt>,
@@ -320,26 +320,8 @@ fn press(
     }
 }
 
-/// One room at a time, and a half-spelled code dropped at the door — exactly as the game
-/// does both.
-fn shut_the_belt(mut belt: ResMut<Belt>, cameras: Query<&mut Camera, With<belt::Rig>>) {
-    belt::show(cameras, false);
-    belt::forget_the_half_press(&mut belt);
-}
-
-fn fold_the_forge_away(
-    mut commands: Commands,
-    rig: Query<Entity, With<forge::Rig>>,
-    mut belt: ResMut<Belt>,
-    cameras: Query<&mut Camera, With<belt::Rig>>,
-) {
-    forge::leave(commands.reborrow(), rig);
-    belt::show(cameras, true);
-    belt::forget_the_half_press(&mut belt);
-}
-
 /// The film stands in for the host: a request it can afford is paid on the spot.
-fn pay_for_it(mut requests: ResMut<forge::CraftRequests>, mut stock: ResMut<forge::Stock>) {
+fn pay_for_it(mut requests: ResMut<forge::CraftRequests>, mut stock: ResMut<rig::Stock>) {
     for item in requests.0.drain(..).collect::<Vec<_>>() {
         stock.0.craft(item);
     }

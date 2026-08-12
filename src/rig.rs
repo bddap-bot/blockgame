@@ -38,6 +38,7 @@ const _: () = assert!(
 /// Ordered clockwise from up, which is the order a cluster is fanned out in — so the
 /// picture of a cluster and the order of this enum are the same fact.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(usize)]
 pub enum Dir {
     Up,
     Right,
@@ -49,11 +50,14 @@ impl Dir {
     pub const ALL: [Dir; WAYS] = [Dir::Up, Dir::Right, Dir::Down, Dir::Left];
 
     pub fn index(self) -> usize {
-        Dir::ALL.iter().position(|d| *d == self).expect("Dir::ALL")
+        self as usize
     }
 
+    /// The `n`th direction. Indexed rather than wrapped: every caller derives `n` from an
+    /// item index the compile-time assert above already bounds, so a wrap would be a silent
+    /// fix for a bug worth hearing about.
     pub fn nth(n: usize) -> Dir {
-        Dir::ALL[n % WAYS]
+        Dir::ALL[n]
     }
 
     /// Which way this points in the picture. Both rigs are looked at dead-on, so up on the
@@ -96,6 +100,17 @@ pub fn coded(code: Code) -> Option<Item> {
         .get(code[0].index() * WAYS + code[1].index())
         .copied()
 }
+
+/// The pile both rigs draw, as its owner last stated it.
+///
+/// A copy rather than a borrow of the authoritative [`crate::inventory::Inventories`]: a
+/// rig is a picture of somebody's things and never the record of them, and one-way means a
+/// drawing bug can never become a pile bug. The game refreshes it each frame.
+///
+/// One between the two of them, because "what I have" is one fact and two copies of it
+/// would eventually be two answers.
+#[derive(Resource, Default)]
+pub struct Stock(pub crate::inventory::Inventory);
 
 // ---------------------------------------------------------------------------
 // The kit: the meshes and paints both rigs are built from.
@@ -423,7 +438,7 @@ pub fn notch_bar(
 
 /// Every notch on every rig: lit per one owned.
 pub fn notches(
-    stock: Res<crate::forge::Stock>,
+    stock: Res<Stock>,
     kit: Res<Kit>,
     mut notches: Query<(&Notch, &mut MeshMaterial3d<StandardMaterial>)>,
 ) {

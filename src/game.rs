@@ -262,7 +262,7 @@ pub fn run(start: Start) -> anyhow::Result<()> {
     .init_resource::<Intent>()
     .init_resource::<MenuIntent>()
     .init_resource::<forge::Nav>()
-    .init_resource::<forge::Stock>()
+    .init_resource::<rig::Stock>()
     .init_resource::<forge::CraftRequests>()
     .init_resource::<Belt>()
     .init_resource::<Held>()
@@ -319,9 +319,9 @@ pub fn run(start: Start) -> anyhow::Result<()> {
     )
     .add_systems(
         OnEnter(Playing::Forge),
-        (forge::enter, shut_the_belt, let_go_of_the_mouse),
+        (forge::enter, belt::shut, let_go_of_the_mouse),
     )
-    .add_systems(OnExit(Playing::Forge), undress_the_forge)
+    .add_systems(OnExit(Playing::Forge), (undress_the_forge, belt::open))
     .add_systems(
         // The same order every frame the rig is up: read the pad, take the pile as it
         // stands, act on it, build what the graph now needs, then move what moves.
@@ -364,10 +364,17 @@ pub fn run(start: Start) -> anyhow::Result<()> {
     .add_systems(
         Update,
         (
-            // Gameplay input alone stops while the pause menu is up. The world keeps
-            // running behind it — a host that froze everybody else's game by reading a
-            // menu would be a worse thing than an unpaused world.
+            // Gameplay input alone stops while another room is up — the pause menu, the
+            // recipe rig. The world keeps running behind them: a host that froze everybody
+            // else's game by reading a menu would be a worse thing than an unpaused world.
+            //
+            // The *stale* read has to stop with it, which is what the second half is for.
+            // `Intent` is a frame's worth of edges, and a resource nobody rewrote is last
+            // frame's edges asserted again: a walk that carries on through the pause menu,
+            // and — since the d-pad became a code — a direction re-pressed sixty times a
+            // second, spelling things nobody aimed at.
             gather_intent.run_if(in_state(Playing::Live)),
+            hush_intent.run_if(not(in_state(Playing::Live))),
             mind_the_body,
             park_or_ride,
             apply_intent,
@@ -544,7 +551,7 @@ fn apply_intent(
         p.yaw = driven.yaw;
         p.pos = driven.seat();
         p.ride = Ride::Driving(driven);
-        pick_item(&intent, &mut belt, &mut held);
+        belt::press(intent.dir, &mut belt, &mut held);
         aim_camera(p, &mut camera);
         return;
     }
@@ -556,8 +563,15 @@ fn apply_intent(
     let fall = inventories.of(session.me()).falling(held.0);
     player::advance(&sim.0, p, &intent, fall, dt);
 
-    pick_item(&intent, &mut belt, &mut held);
+    belt::press(intent.dir, &mut belt, &mut held);
     aim_camera(p, &mut camera);
+}
+
+/// Nothing at all, which is what a room other than the world is allowed to ask of the
+/// player's body. One writer for [`Intent`] either way, so there is never a frame whose
+/// intent is some older frame's.
+fn hush_intent(mut intent: ResMut<Intent>) {
+    *intent = Intent::default();
 }
 
 /// What a body flat on its back can still ask for.
@@ -575,12 +589,6 @@ fn mind_the_body(me: Res<Me>, mut intent: ResMut<Intent>) {
             ..Intent::default()
         };
     }
-}
-
-/// Spells a code, and hands over whatever it names. Two presses of the d-pad reach any of
-/// the fourteen things there are, from anywhere, without a cursor to keep track of.
-fn pick_item(intent: &Intent, belt: &mut Belt, held: &mut Held) {
-    belt::press(intent.dir, belt, held);
 }
 
 /// Puts the camera in the player's head. The one place it is moved, so a driver's view and
@@ -1053,30 +1061,21 @@ fn open_forge(
 fn dress_the_forge(
     session: NonSend<Session>,
     inventories: Res<Inventories>,
-    mut stock: ResMut<forge::Stock>,
+    mut stock: ResMut<rig::Stock>,
     mut hud: Query<&mut Visibility, With<hud::HudRoot>>,
 ) {
     belt::wear_the_stock(inventories.of(session.me()), &mut stock);
     hud::show(&mut hud, false);
 }
 
-/// The same pile, handed to the belt. One [`forge::Stock`] feeds both rigs, so what your
+/// The same pile, handed to the belt. One [`rig::Stock`] feeds both rigs, so what your
 /// body is wearing and what the graph is counting cannot come apart.
 fn wear_the_belt(
     session: NonSend<Session>,
     inventories: Res<Inventories>,
-    mut stock: ResMut<forge::Stock>,
+    mut stock: ResMut<rig::Stock>,
 ) {
     belt::wear_the_stock(inventories.of(session.me()), &mut stock);
-}
-
-/// One room at a time: the belt's camera is switched off while the recipe rig is up and
-/// back on when it folds away. Switched rather than despawned — the belt is a fixed set of
-/// geometry that lives as long as the world does, and rebuilding it on every visit to the
-/// forge would be a rig that pops back into existence a frame late.
-fn shut_the_belt(mut belt: ResMut<Belt>, cameras: Query<&mut Camera, With<belt::Rig>>) {
-    belt::show(cameras, false);
-    belt::forget_the_half_press(&mut belt);
 }
 
 /// Puts the rig's craft requests through the same door the hotbar's used: the host pays
@@ -1105,14 +1104,10 @@ fn close_forge(nav: Res<forge::Nav>, mut playing: ResMut<NextState<Playing>>) {
 fn undress_the_forge(
     mut commands: Commands,
     rig: Query<Entity, With<forge::Rig>>,
-    belt_cameras: Query<&mut Camera, With<belt::Rig>>,
-    mut belt: ResMut<Belt>,
     mut hud: Query<&mut Visibility, With<hud::HudRoot>>,
     mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
     forge::leave(commands.reborrow(), rig);
-    belt::show(belt_cameras, true);
-    belt::forget_the_half_press(&mut belt);
     hud::show(&mut hud, true);
     grab_mouse(&mut cursor, true);
 }

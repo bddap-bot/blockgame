@@ -28,10 +28,9 @@
 use bevy::prelude::*;
 
 use crate::avatar::{self, Body, Palette};
-use crate::forge::Stock;
 use crate::inventory::{Held, Inventory};
 use crate::registry::Item;
-use crate::rig::{self, Dir, Kit, code, coded};
+use crate::rig::{self, Dir, Kit, Stock, code, coded};
 
 /// Where the belt is built, far above any world and far from [`crate::forge`]'s own
 /// origin: two scenes, one set of coordinates each, and no render layer needed to keep
@@ -75,6 +74,9 @@ const SHUT_AT: Vec3 = Vec3::new(0.86, 1.02, 0.45);
 
 /// Seconds the rig takes to bloom, and to fold back up.
 const BLOOM: f32 = 0.18;
+
+/// How big the arrowhead on a leg is drawn.
+const ARROW: f32 = 0.42;
 
 /// Where a thing hangs, in the spaceman's own coordinates: out to its cluster, then out
 /// again to its place in it.
@@ -133,11 +135,7 @@ impl Belt {
 // The rig.
 // ---------------------------------------------------------------------------
 
-/// Everything the belt owns, so putting it away is one despawn.
-#[derive(Component, Clone, Copy)]
-pub struct Rig;
-
-/// The camera the belt is seen through: over the world, under nothing.
+/// The camera the belt is seen through: over the world, under the recipe rig.
 #[derive(Component)]
 pub struct Eye;
 
@@ -158,14 +156,34 @@ pub struct Station {
 #[derive(Component)]
 pub struct Spin(f32);
 
-/// One leg of one route — the string and the two barbs of its arrowhead alike, so lighting
-/// a leg is one query. `hook` is the direction of its first press; `second` is set on the
-/// legs that run from a cluster out to a thing, which is exactly the difference between
-/// "drawn while that cluster is open" and "drawn while that thing is in your hand".
+/// One leg of one route — carried by the string and by the two barbs of its arrowhead
+/// alike, so lighting a leg is one query.
+///
+/// Which of the two presses a leg belongs to is the variant, and the direction it runs in
+/// is the payload of that variant, so a leg cannot be built pointing somewhere its code
+/// does not go. A slot leg carries the *first* press as well, because that is what decides
+/// whether it is drawn at all — a leg that did not know its own cluster would have to look
+/// the answer up.
 #[derive(Component, Clone, Copy)]
-pub struct Leg {
-    hook: Dir,
-    second: Option<Item>,
+pub enum Leg {
+    /// Chest to cluster, running the way the first press points.
+    Hook(Dir),
+    /// Cluster to thing, running the way the second press points.
+    Slot { hook: Dir, slot: Dir },
+}
+
+impl Leg {
+    /// Which way the leg runs, and how far along it the arrowhead sits.
+    ///
+    /// A first leg wears its arrowhead near the *body* and a second leg near its *thing*,
+    /// which is not a nicety: the left-hand station of a cluster lies on the line the first
+    /// leg came in along, and an arrowhead at that end would be drawn on top of it.
+    fn points(self) -> (Dir, f32) {
+        match self {
+            Leg::Hook(hook) => (hook, 0.4),
+            Leg::Slot { slot, .. } => (slot, 0.68),
+        }
+    }
 }
 
 /// The spaceman himself, and the hand whose contents answer "what am I holding".
@@ -179,7 +197,6 @@ pub struct Wearer(Body);
 /// pops.
 pub fn enter(mut commands: Commands, kit: Res<Kit>, palette: Res<Palette>) {
     commands.spawn((
-        Rig,
         Eye,
         Camera3d::default(),
         Camera {
@@ -200,7 +217,6 @@ pub fn enter(mut commands: Commands, kit: Res<Kit>, palette: Res<Palette>) {
         Transform::from_translation(ORIGIN + CHEST + Vec3::new(0.0, 0.0, SHUT_REACH)),
     ));
     commands.spawn((
-        Rig,
         PointLight {
             intensity: 3_000_000.0,
             range: 90.0,
@@ -215,7 +231,6 @@ pub fn enter(mut commands: Commands, kit: Res<Kit>, palette: Res<Palette>) {
     // same colour as the hillside. Scaled from nothing rather than faded, so it irises open
     // with the bloom and takes no second material to animate an alpha through.
     commands.spawn((
-        Rig,
         Pane,
         Mesh3d(kit.cube()),
         MeshMaterial3d(kit.backdrop()),
@@ -230,37 +245,35 @@ pub fn enter(mut commands: Commands, kit: Res<Kit>, palette: Res<Palette>) {
         Transform::from_translation(ORIGIN)
             .with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
     );
-    commands.entity(body.root).insert(Rig);
     commands.insert_resource(Wearer(body));
 
     for hook in Dir::ALL {
-        route(&mut commands, &kit, CHEST, hub(hook), hook, None);
+        route(&mut commands, &kit, CHEST, Leg::Hook(hook), HOOK);
     }
     for item in Item::ALL {
-        let [hook, _] = code(*item);
+        let [hook, slot] = code(*item);
         let at = station(*item);
-        route(&mut commands, &kit, hub(hook), at, hook, Some(*item));
+        route(
+            &mut commands,
+            &kit,
+            hub(hook),
+            Leg::Slot { hook, slot },
+            FAN,
+        );
 
         let holder = commands
             .spawn((
-                Rig,
                 Station { item: *item, at },
                 Transform::from_translation(ORIGIN + at),
                 Visibility::Hidden,
             ))
             .id();
-        let shape = rig::silhouette(
-            &mut commands,
-            &palette,
-            *item,
-            Vec3::ZERO,
-            (Rig, Spin(at.x)),
-        );
+        let shape = rig::silhouette(&mut commands, &palette, *item, Vec3::ZERO, Spin(at.x));
         commands.entity(holder).add_child(shape);
         // The same notch bar the recipe rig draws, run by the same system: how many you
         // own, as a height. It is what the number in the old hotbar cell was, and the one
         // place either surface states a count.
-        for notch in rig::notch_bar(&mut commands, &kit, *item, Vec3::ZERO, Rig) {
+        for notch in rig::notch_bar(&mut commands, &kit, *item, Vec3::ZERO, ()) {
             commands.entity(holder).add_child(notch);
         }
     }
@@ -272,42 +285,29 @@ pub fn enter(mut commands: Commands, kit: Res<Kit>, palette: Res<Palette>) {
 /// same claim — this leads to that — and a player who has been in the forge has already
 /// been taught to follow one.
 ///
-/// A first leg wears its arrowhead near the *body* and a second leg near its *thing*, which
-/// is not a nicety: the left-hand station of a cluster lies on the line the first leg came
-/// in along, and an arrowhead at that end would be drawn on top of it.
-fn route(
-    commands: &mut Commands,
-    kit: &Kit,
-    from: Vec3,
-    to: Vec3,
-    hook: Dir,
-    second: Option<Item>,
-) {
-    let along = to - from;
-    let leg = Leg { hook, second };
-    let points = Dir::ALL
-        .into_iter()
-        .find(|d| d.towards().dot(along.normalize_or_zero()) > 0.9)
-        .unwrap_or(hook);
+/// The leg says which way it runs and the caller says how far, so the string and the arrow
+/// on it cannot disagree with the code that put them there — and there is no direction to
+/// recover from the geometry afterwards.
+fn route(commands: &mut Commands, kit: &Kit, from: Vec3, leg: Leg, reach: f32) {
+    let (points, head) = leg.points();
+    let along = points.towards() * reach;
     commands.spawn((
-        Rig,
         leg,
         Mesh3d(kit.cube()),
         MeshMaterial3d(kit.string()),
-        Transform::from_translation(ORIGIN + (from + to) / 2.0)
-            .with_rotation(Quat::from_rotation_arc(Vec3::Y, along.normalize_or_zero()))
-            .with_scale(Vec3::new(0.05, along.length(), 0.05)),
+        Transform::from_translation(ORIGIN + from + along / 2.0)
+            .with_rotation(Quat::from_rotation_arc(Vec3::Y, points.towards()))
+            .with_scale(Vec3::new(0.05, reach, 0.05)),
         Visibility::Hidden,
     ));
-    let head = if second.is_some() { 0.68 } else { 0.4 };
     rig::arrowhead(
         commands,
         kit,
         points,
         ORIGIN + from + along * head,
-        0.42,
+        ARROW,
         kit.string(),
-        (Rig, leg),
+        leg,
     );
 }
 
@@ -407,11 +407,11 @@ pub fn legs(
         // hanging: shut, they are all folded into his chest and there is nowhere for a
         // string to run. Every selection blooms the whole map again, which is what makes the
         // codes learnable without anybody having to remember one.
-        let show = match (belt.armed, leg.second) {
+        let show = match (belt.armed, *leg) {
             (None, _) => false,
             // Open: all four first legs, and the second legs of the cluster you are in.
-            (Some(_), None) => true,
-            (Some(hook), Some(_)) => leg.hook == hook,
+            (Some(_), Leg::Hook(_)) => true,
+            (Some(armed), Leg::Slot { hook, .. }) => hook == armed,
         };
         let vis = if show {
             Visibility::Inherited
@@ -423,7 +423,7 @@ pub fn legs(
         }
         // The leg you have already pressed burns amber — one press banked, drawn as the
         // thing you are standing on.
-        let lit = belt.armed == Some(leg.hook) && leg.second.is_none();
+        let lit = matches!(*leg, Leg::Hook(hook) if belt.armed == Some(hook));
         let want = if lit { kit.waiting() } else { kit.string() };
         if paint.0 != want {
             paint.0 = want;
@@ -457,26 +457,33 @@ pub fn eye(belt: Res<Belt>, mut eye: Query<&mut Transform, With<Eye>>) {
         .rotation;
 }
 
-/// Draws the belt, or stops. Switched rather than despawned — it is a fixed set of geometry
-/// that lives as long as the world does, and rebuilding it on every visit to the recipe rig
-/// would be a rig that pops back into existence a frame late.
-pub fn show(mut cameras: Query<&mut Camera, With<Rig>>, drawn: bool) {
+/// The two doors of the recipe rig, from this side.
+///
+/// The belt stops being drawn while the other room is up and starts again when it folds
+/// away — switched rather than despawned, because it is a fixed set of geometry that lives
+/// as long as the world does and rebuilding it on every visit would be a rig that pops back
+/// into existence a frame late.
+///
+/// Both drop a half-spelled code. A code is two presses and both of them belong to the
+/// surface that was on screen when they were made; carrying half of one through a door
+/// means the first press *inside* the new room finishes something nobody aimed at — arm a
+/// cluster in the world, press craft, and the graph re-centres on whatever that stale press
+/// and your next one happen to spell between them.
+pub fn shut(belt: ResMut<Belt>, cameras: Query<&mut Camera, With<Eye>>) {
+    at_the_door(belt, cameras, false);
+}
+
+pub fn open(belt: ResMut<Belt>, cameras: Query<&mut Camera, With<Eye>>) {
+    at_the_door(belt, cameras, true);
+}
+
+fn at_the_door(mut belt: ResMut<Belt>, mut cameras: Query<&mut Camera, With<Eye>>, drawn: bool) {
+    belt.armed = None;
     for mut camera in &mut cameras {
         if camera.is_active != drawn {
             camera.is_active = drawn;
         }
     }
-}
-
-/// Drops a half-spelled code at the door of a room.
-///
-/// A code is two presses and both of them belong to the surface that was on screen when
-/// they were made. Carrying half of one through a door means the first press *inside* the
-/// new room finishes something nobody aimed at — arm a cluster in the world, press craft,
-/// and the rig re-centres on whatever that stale first press plus your next one happens to
-/// spell.
-pub fn forget_the_half_press(belt: &mut Belt) {
-    belt.armed = None;
 }
 
 /// Hands both rigs the pile they draw. One [`Stock`] between them, because "what I have"
