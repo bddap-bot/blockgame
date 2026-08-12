@@ -66,7 +66,7 @@ const EMPTY: f32 = 0.62;
 /// Where the eye stands at rest and when the chart is open, and how far above the held star
 /// it looks — which is what hangs that star low on the screen, where a hotbar goes.
 const REST_BACK: f32 = 7.5;
-const REST_LIFT: f32 = 1.05;
+const REST_LIFT: f32 = 1.30;
 const OPEN_BACK: f32 = 13.0;
 
 /// One press of the d-pad.
@@ -803,7 +803,7 @@ pub fn chip(
         };
         let code = chart.code(item);
         let middle = (code.len() as f32 - 1.0) / 2.0;
-        let under = chart.star(item).at + Vec2::new(0.0, -1.45);
+        let under = chart.star(item).at + Vec2::new(0.0, -1.30);
         commands.entity(root).with_children(|chip| {
             // Its own dark plate, for the stars' reason: a pale grey d-pad against a
             // sunlit stone cliff is a code nobody can read back.
