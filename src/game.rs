@@ -13,12 +13,16 @@ use bevy::window::{CursorGrabMode, CursorOptions, MonitorSelection, PrimaryWindo
 use std::collections::{HashMap, HashSet};
 
 use crate::avatar;
+use crate::code::Pad;
 use crate::forge;
+use crate::hotbar;
 use crate::hud;
 use crate::input::{
-    Intent, MenuIntent, PITCH_LIMIT, gather_forge_nav, gather_intent, gather_menu_intent,
+    Drum, Intent, MenuIntent, PITCH_LIMIT, gather_drum, gather_forge_nav, gather_intent,
+    gather_menu_intent,
 };
-use crate::inventory::{Held, Inventories, Inventory};
+use crate::inventory::{Held, Inventories, Inventory, Pocket};
+use crate::jingle;
 use crate::mesh::{ChunkMesh, build_chunk_mesh};
 use crate::net::wire::CarPose;
 use crate::net::{Boot, Event, Msg, PlayerId, Pose, Role, Session, Target, lan};
@@ -250,8 +254,10 @@ pub fn run(start: Start) -> anyhow::Result<()> {
     .init_resource::<Intent>()
     .init_resource::<MenuIntent>()
     .init_resource::<forge::Nav>()
-    .init_resource::<forge::Stock>()
     .init_resource::<forge::CraftRequests>()
+    .init_resource::<Pocket>()
+    .init_resource::<Pad>()
+    .init_resource::<Drum>()
     .init_resource::<Held>()
     .init_resource::<Chunks>()
     .init_resource::<Digging>()
@@ -273,8 +279,10 @@ pub fn run(start: Start) -> anyhow::Result<()> {
     // unreachable and nothing was on fire.
     .add_systems(
         PreUpdate,
-        (gather_menu_intent, gather_forge_nav).after(InputSystems),
+        (gather_menu_intent, gather_forge_nav, gather_drum).after(InputSystems),
     )
+    // The eight notes a code is made of, built before anything can press one.
+    .add_systems(Startup, jingle::tune)
     // Every screen the game draws is sized for the Deck's 800 rows, the title included, so
     // this runs whatever phase we are in and not just once: a TV that changes mode under
     // us is a resize like any other.
@@ -294,7 +302,7 @@ pub fn run(start: Start) -> anyhow::Result<()> {
     )
     .add_systems(
         OnEnter(Phase::World),
-        (enter_world, setup, hud::setup).chain(),
+        (enter_world, setup, hud::setup, hotbar::setup).chain(),
     )
     .add_systems(OnEnter(Playing::Paused), pause::open)
     .add_systems(OnExit(Playing::Paused), pause::close)
@@ -307,11 +315,11 @@ pub fn run(start: Start) -> anyhow::Result<()> {
     .add_systems(OnEnter(Playing::Forge), (forge::enter, let_go_of_the_mouse))
     .add_systems(OnExit(Playing::Forge), undress_the_forge)
     .add_systems(
-        // The same order every frame the rig is up: read the pad, take the pile as it
-        // stands, act on it, build what the graph now needs, then move what moves.
+        // The same order every frame the rig is up: act on the pile as it stands, build
+        // what the graph now needs, then move what moves.
         Update,
         (
-            dress_the_forge,
+            hide_the_words,
             forge::drive,
             submit_forge_crafts,
             forge::rebuild,
@@ -346,12 +354,20 @@ pub fn run(start: Start) -> anyhow::Result<()> {
             stream_chunks,
             remesh_dirty,
             net_send_pose,
-            hud::update_hotbar,
             hud::fade_notice,
             open_pause_menu.run_if(in_state(Playing::Live)),
         )
             .chain()
             .run_if(in_state(Phase::World)),
+    )
+    // The pad and the pile it draws belong to no one state: the same two presses pick a
+    // thing out in the world and re-centre the rig on it, and the same picture of the pile
+    // is under both. Paused is the exception — a d-pad press there is a menu row.
+    .add_systems(
+        Update,
+        (fill_the_pocket, hotbar::drum, hotbar::redraw, jingle::play)
+            .chain()
+            .run_if(in_state(Playing::Live).or(in_state(Playing::Forge))),
     );
 
     // A bevy error exit is the process's error exit: swallowing it would report success to
@@ -484,7 +500,7 @@ fn apply_intent(
     inventories: Res<Inventories>,
     session: NonSend<Session>,
     mut me: ResMut<Me>,
-    mut held: ResMut<Held>,
+    held: Res<Held>,
     mut camera: Query<&mut Transform, With<Camera3d>>,
 ) {
     // A long frame (window drag, a chunk-mesh hitch) must not turn into a teleport
@@ -507,7 +523,6 @@ fn apply_intent(
         p.yaw = driven.yaw;
         p.pos = driven.seat();
         p.ride = Ride::Driving(driven);
-        pick_item(&intent, &mut held);
         aim_camera(p, &mut camera);
         return;
     }
@@ -519,7 +534,6 @@ fn apply_intent(
     let fall = inventories.of(session.me()).falling(held.0);
     player::advance(&sim.0, p, &intent, fall, dt);
 
-    pick_item(&intent, &mut held);
     aim_camera(p, &mut camera);
 }
 
@@ -537,18 +551,6 @@ fn mind_the_body(me: Res<Me>, mut intent: ResMut<Intent>) {
             pause: intent.pause,
             ..Intent::default()
         };
-    }
-}
-
-/// Moves the hotbar cursor. The number row reaches the first nine cells; stepping reaches
-/// every cell. A key pointed past the end of the hotbar does nothing rather than wrapping
-/// round to something the player was not aiming at.
-fn pick_item(intent: &Intent, held: &mut Held) {
-    if let Some(cell) = intent.item_pick.and_then(|slot| Item::ALL.get(slot)) {
-        held.0 = *cell;
-    }
-    if intent.item_delta != 0 {
-        held.0 = held.0.step(intent.item_delta);
     }
 }
 
@@ -1016,17 +1018,25 @@ fn open_forge(
     playing.set(Playing::Forge);
 }
 
-/// Hands the rig the pile it draws, and hides the words while it is up.
-fn dress_the_forge(
+/// Refreshes the picture of the pile that the pad and the rig both draw.
+///
+/// One resource for both surfaces, copied one way out of the authoritative pile: the pad
+/// counting one thing while the rig counted another would be two answers to "what do I
+/// have", and the host only ever gave one.
+fn fill_the_pocket(
     session: NonSend<Session>,
     inventories: Res<Inventories>,
-    mut stock: ResMut<forge::Stock>,
-    mut hud: Query<&mut Visibility, With<hud::HudRoot>>,
+    mut pocket: ResMut<Pocket>,
 ) {
     let mine = inventories.of(session.me());
-    if stock.0 != *mine {
-        stock.0 = mine.clone();
+    if pocket.0 != *mine {
+        pocket.0 = mine.clone();
     }
+}
+
+/// Puts the words away while the rig is up. The pad stays: it has no words on it, and it
+/// is what steers the rig.
+fn hide_the_words(mut hud: Query<&mut Visibility, With<hud::HudRoot>>) {
     hud::show(&mut hud, false);
 }
 

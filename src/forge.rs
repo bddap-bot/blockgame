@@ -14,12 +14,17 @@
 //! the whole reason this is a graph layout and not a tree walk: a second parent adds a
 //! string, never a copy.
 //!
+//! **Two presses to any recipe.** The rig has no cursor of its own: it hangs whatever the
+//! pad ([`crate::hotbar`]) is holding in the middle, and the pad stays on screen while the
+//! rig is up. So a code typed in here re-centres the graph on that thing, and the same code
+//! typed out in the world puts that thing in your hand — one selection, two views of it.
+//!
 //! **No words, and no second inventory.** What the player is told is carried by shape
 //! (each craftable has its own silhouette), by colour (the registry's own), by the beads,
 //! and by the bar beside each node — one notch per one you own, so crafting makes a
 //! visible thing grow. The only text in the mode is none.
 //!
-//! **What this module does not know.** It draws [`Stock`] and it asks for crafts by
+//! **What this module does not know.** It draws [`Pocket`] and it asks for crafts by
 //! pushing to [`CraftRequests`]. Whose pile that is, and who is allowed to say a craft
 //! happened, stays with the host in [`crate::game`] — so the same rig runs in the game,
 //! where the host answers, and under `blockgame craft-film`, where a test harness does.
@@ -28,7 +33,7 @@ use bevy::prelude::*;
 use std::collections::HashMap;
 
 use crate::avatar::{self, Palette, Part, Skin, part};
-use crate::inventory::Inventory;
+use crate::inventory::{Held, Inventory, Pocket};
 use crate::registry::{Class, Item};
 
 /// Where the rig is built, far above any world: the game's own camera stops at 1200
@@ -58,25 +63,11 @@ const POP: f32 = 0.30;
 /// from a script under `craft-film`, so the rig itself never asks which.
 #[derive(Resource, Default, Debug, Clone, Copy)]
 pub struct Nav {
-    /// Cursor steps: `+1` right, `-1` left.
-    pub across: i32,
-    /// Cursor steps: `+1` down a tier, `-1` up a tier.
-    pub down: i32,
-    /// Re-centre the rig on whatever the cursor is on.
-    pub focus: bool,
-    /// Make one of whatever the cursor is on.
+    /// Make one of whatever is in the middle.
     pub craft: bool,
     /// Back to the world.
     pub leave: bool,
 }
-
-/// The pile the rig draws, as its owner last stated it.
-///
-/// A copy rather than a borrow of the authoritative [`crate::inventory::Inventories`]:
-/// the rig is a picture of somebody's things and never the record of them, and one-way
-/// means a drawing bug can never become a pile bug. The game refreshes it each frame.
-#[derive(Resource, Default)]
-pub struct Stock(pub Inventory);
 
 /// Crafts the player has asked for and nobody has answered yet.
 ///
@@ -115,7 +106,7 @@ pub struct Wire {
 pub struct Graph {
     pub nodes: Vec<Node>,
     pub wires: Vec<Wire>,
-    /// Node indices tier by tier, topmost tier first — the grid the d-pad walks.
+    /// Node indices tier by tier, topmost tier first — the shelves the rig is built on.
     pub rows: Vec<Vec<usize>>,
     /// Where in `rows` the focus is.
     pub focus: (usize, usize),
@@ -244,31 +235,6 @@ impl Graph {
 
     fn pos(&self, cursor: (usize, usize)) -> Vec3 {
         self.nodes[self.rows[cursor.0][cursor.1]].at
-    }
-
-    /// Walks the cursor. Left and right move along a tier; up and down change tier and
-    /// land on whichever node is nearest overhead — the hotbar's own rule, which is the
-    /// only navigation these players already know.
-    pub fn walk(&self, cursor: (usize, usize), across: i32, down: i32) -> (usize, usize) {
-        let (mut row, mut col) = cursor;
-        if across != 0 {
-            let width = self.rows[row].len() as i32;
-            col = (col as i32 + across).rem_euclid(width) as usize;
-        }
-        if down != 0 {
-            let next = row as i32 + down;
-            if (0..self.rows.len() as i32).contains(&next) {
-                let x = self.pos((row, col)).x;
-                row = next as usize;
-                col = (0..self.rows[row].len())
-                    .min_by(|a, b| {
-                        let d = |c: &usize| (self.pos((row, *c)).x - x).abs();
-                        d(a).total_cmp(&d(b))
-                    })
-                    .expect("no tier is empty");
-            }
-        }
-        (row, col)
     }
 
     /// The middle of everything laid out — where the camera points.
@@ -468,11 +434,16 @@ pub struct Rig;
 #[derive(Component)]
 pub struct Built;
 
-/// The rig's state between frames: what is in the middle, and where the cursor is.
+/// The rig's state between frames: what is in the middle, and what the pile looked like
+/// when it was last drawn.
+///
+/// There is no cursor. The thing in the middle is the thing the pad is holding, and the pad
+/// is the same two presses inside the rig as it is outside — so a rig cursor would be a
+/// second way to point at an item, next to a way that already reaches every item in two
+/// presses. The one that could be somewhere else was the one that went.
 #[derive(Resource)]
 pub struct Forge {
     pub graph: Graph,
-    pub cursor: (usize, usize),
     /// The pile as of the last frame, so a count that went up can be spotted and cheered.
     seen: Inventory,
     /// Rebuilt geometry is wanted next frame — set when the focus moves.
@@ -481,23 +452,20 @@ pub struct Forge {
 
 impl Forge {
     pub fn new(focus: Item, seen: Inventory) -> Forge {
-        let graph = Graph::around(focus);
-        let cursor = graph.focus;
         Forge {
-            graph,
-            cursor,
+            graph: Graph::around(focus),
             seen,
             dirty: true,
         }
     }
 
-    pub fn cursor_item(&self) -> Item {
-        self.graph.item_at(self.cursor)
+    /// What the rig is centred on, and so what the craft button pays for.
+    pub fn middle(&self) -> Item {
+        self.graph.item_at(self.graph.focus)
     }
 
     fn refocus(&mut self, item: Item) {
         self.graph = Graph::around(item);
-        self.cursor = self.graph.focus;
         self.dirty = true;
     }
 }
@@ -658,26 +626,26 @@ pub fn leave(mut commands: Commands, rig: Query<Entity, With<Rig>>) {
     commands.remove_resource::<Forge>();
 }
 
-/// Reads the pad: walks the cursor, re-centres the rig, asks for crafts.
+/// Follows the pad, and asks for crafts.
+///
+/// The rig has no navigation of its own: whatever the pad is holding is what hangs in the
+/// middle, so typing a code inside the rig re-centres it on that thing — and typing the
+/// same code outside puts the same thing in your hand. Two presses reach any recipe in the
+/// game from any other, which is a thing walking a graph could never promise.
 pub fn drive(
     nav: Res<Nav>,
-    stock: Res<Stock>,
+    held: Res<Held>,
+    pocket: Res<Pocket>,
     mut forge: ResMut<Forge>,
     mut requests: ResMut<CraftRequests>,
 ) {
-    if nav.across != 0 || nav.down != 0 {
-        forge.cursor = forge.graph.walk(forge.cursor, nav.across, nav.down);
-    }
-    if nav.focus {
-        let item = forge.cursor_item();
-        if item != forge.graph.item_at(forge.graph.focus) {
-            forge.refocus(item);
-        }
+    if held.0 != forge.middle() {
+        forge.refocus(held.0);
     }
     if nav.craft {
         // The deepest thing that is actually makeable, not the thing pointed at: a child
         // holding the button on a car makes the nails first and sees each one appear.
-        if let Some(step) = next_step(&stock.0, forge.cursor_item()) {
+        if let Some(step) = next_step(&pocket.0, forge.middle()) {
             requests.0.push(step);
         }
     }
@@ -809,7 +777,7 @@ pub fn rebuild(
         Cursor,
         Mesh3d(kit.ring.clone()),
         MeshMaterial3d(kit.waiting.clone()),
-        Transform::from_translation(ORIGIN + graph.pos(forge.cursor))
+        Transform::from_translation(ORIGIN + graph.pos(graph.focus))
             .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
     ));
 }
@@ -825,12 +793,12 @@ pub fn rebuild(
 /// number and no colour anybody has to be taught.
 pub fn beads(
     time: Res<Time>,
-    stock: Res<Stock>,
+    pocket: Res<Pocket>,
     mut beads: Query<(&Bead, &mut Transform, &mut MeshMaterial3d<StandardMaterial>)>,
 ) {
     let clock = time.elapsed_secs();
     for (bead, mut at, mut paint) in &mut beads {
-        let lit = stock.0.count(bead.part) > bead.nth;
+        let lit = pocket.0.count(bead.part) > bead.nth;
         let want = if lit { &bead.lit } else { &bead.dark };
         if paint.0 != *want {
             paint.0 = want.clone();
@@ -846,12 +814,12 @@ pub fn beads(
 
 /// The bar beside each node: one notch lit per one owned.
 pub fn notches(
-    stock: Res<Stock>,
+    pocket: Res<Pocket>,
     kit: Res<Kit>,
     mut notches: Query<(&Notch, &mut MeshMaterial3d<StandardMaterial>)>,
 ) {
     for (notch, mut paint) in &mut notches {
-        let lit = stock.0.count(notch.item).min(BAR_CAP) > notch.nth;
+        let lit = pocket.0.count(notch.item).min(BAR_CAP) > notch.nth;
         let want = if lit { &notch.lit } else { &kit.dark };
         if paint.0 != *want {
             paint.0 = want.clone();
@@ -879,11 +847,14 @@ pub fn nodes(
     }
 }
 
-/// The ring the cursor wears: green when the button in their hand would make one right
-/// now, amber when something under it still has to be dug up or built.
+/// The ring around the thing in the middle: green when the button in their hand would make
+/// one right now, amber when something under it still has to be dug up or built.
+///
+/// It slides rather than jumps, so re-centring the rig on a code reads as the ring
+/// travelling to the new thing and the graph rearranging around it.
 pub fn cursor(
     time: Res<Time>,
-    stock: Res<Stock>,
+    pocket: Res<Pocket>,
     forge: Res<Forge>,
     kit: Res<Kit>,
     mut ring: Query<(&mut Transform, &mut MeshMaterial3d<StandardMaterial>), With<Cursor>>,
@@ -895,14 +866,9 @@ pub fn cursor(
     let graph = &forge.graph;
     at.translation = at
         .translation
-        .lerp(ORIGIN + graph.pos(forge.cursor), (dt * 14.0).min(1.0));
-    let size = if forge.cursor == graph.focus {
-        1.42
-    } else {
-        1.12
-    };
-    at.scale = Vec3::splat(size * (1.0 + 0.06 * (clock * 5.0).sin()));
-    let want = if stock.0.can_craft(graph.item_at(forge.cursor)) {
+        .lerp(ORIGIN + graph.pos(graph.focus), (dt * 14.0).min(1.0));
+    at.scale = Vec3::splat(1.42 * (1.0 + 0.06 * (clock * 5.0).sin()));
+    let want = if pocket.0.can_craft(forge.middle()) {
         &kit.ready
     } else {
         &kit.waiting
@@ -949,27 +915,27 @@ pub fn eye(time: Res<Time>, forge: Res<Forge>, mut eye: Query<&mut Transform, Wi
 
 /// Celebrates whatever the pile says really appeared since last frame.
 ///
-/// Driven off the [`Stock`] rather than off the button, because the button is a *request*
+/// Driven off the [`Pocket`] rather than off the button, because the button is a *request*
 /// and the host is what answers it: on a peer the answer arrives a round trip later, and
 /// a rig that popped on the press would cheer for crafts the host refused. One rule
 /// covers both — the thing that grew is the thing that was made.
 pub fn react(
     mut commands: Commands,
     kit: Res<Kit>,
-    stock: Res<Stock>,
+    pocket: Res<Pocket>,
     forge: ResMut<Forge>,
     mut nodes: Query<&mut NodeView>,
 ) {
     let grew: Vec<Item> = Item::ALL
         .iter()
         .copied()
-        .filter(|i| stock.0.count(*i) > forge.seen.count(*i))
+        .filter(|i| pocket.0.count(*i) > forge.seen.count(*i))
         .collect();
     if grew.is_empty() {
         return;
     }
     let forge = forge.into_inner();
-    forge.seen = stock.0.clone();
+    forge.seen = pocket.0.clone();
     for made in grew {
         for mut view in nodes.iter_mut() {
             if view.item == made {
@@ -1097,19 +1063,6 @@ mod tests {
                 above.contains(&wanted),
                 "{wanted:?} is not shown above a nail"
             );
-        }
-    }
-
-    /// The d-pad's rules: left and right stay on a tier and wrap, up and down change tier
-    /// and land nearest overhead. A cursor that could leave the grid would be a rig with
-    /// no way back.
-    #[test]
-    fn the_cursor_stays_on_the_grid() {
-        let g = Graph::around(Item::Car);
-        let mut at = g.focus;
-        for step in [(1, 0), (1, 0), (0, 1), (-1, 0), (0, -1), (0, -1), (0, -1)] {
-            at = g.walk(at, step.0, step.1);
-            assert!(at.0 < g.rows.len() && at.1 < g.rows[at.0].len(), "{at:?}");
         }
     }
 

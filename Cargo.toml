@@ -7,7 +7,10 @@ description = "A small Minecraft-like voxel game: Bevy render/ECS, iroh host-aut
 repository = "https://github.com/bddap-bot/blockgame"
 
 [dependencies]
-bevy = "0.18"
+# `wav` is off by default and the pad needs it: every code is a two-note tune, and the
+# eight notes are synthesised into wav bytes at startup rather than shipped as files that
+# could go missing or drift out of tune with the pitch the pad is drawn from.
+bevy = { version = "0.18", features = ["wav"] }
 iroh = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 serde = { version = "1", features = ["derive"] }
