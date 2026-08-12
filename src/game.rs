@@ -54,6 +54,16 @@ const FOV: f32 = 75.0 * std::f32::consts::PI / 180.0;
 
 const SKY: Color = Color::srgb(0.52, 0.72, 0.95);
 
+/// The player's own camera: their head, and the only camera that is a *view of the world*.
+///
+/// A marker rather than "the one `Camera3d`", because it stopped being the one: the belt
+/// keeps a camera over the world for as long as the world lasts, and the recipe rig adds a
+/// third while it is up. A `single_mut` over `With<Camera3d>` quietly returns an error the
+/// moment there are two — a first-person camera that never moves off the origin, every
+/// frame, silently.
+#[derive(Component)]
+struct Eye;
+
 #[derive(Resource)]
 struct Sim(World);
 
@@ -309,7 +319,7 @@ pub fn run(start: Start) -> anyhow::Result<()> {
     )
     .add_systems(
         OnEnter(Playing::Forge),
-        (forge::enter, shut_the_belt_camera, let_go_of_the_mouse),
+        (forge::enter, shut_the_belt, let_go_of_the_mouse),
     )
     .add_systems(OnExit(Playing::Forge), undress_the_forge)
     .add_systems(
@@ -453,9 +463,12 @@ fn setup(
     });
     commands.insert_resource(WorldMaterial(world_material));
 
-    commands.insert_resource(avatar::Palette::new(&mut meshes, &mut materials));
-
     commands.spawn((
+        // The eye, and the one camera in the game that is *the player looking at the world*.
+        // Marked, because it is no longer the only `Camera3d` alive: the belt hangs one over
+        // the world for as long as the world lasts, and a bare `With<Camera3d>` query for
+        // "the camera" silently matches nothing once there are two of them.
+        Eye,
         Camera3d::default(),
         Projection::Perspective(PerspectiveProjection {
             fov: FOV,
@@ -509,7 +522,7 @@ fn apply_intent(
     mut me: ResMut<Me>,
     mut belt: ResMut<Belt>,
     mut held: ResMut<Held>,
-    mut camera: Query<&mut Transform, With<Camera3d>>,
+    mut camera: Query<&mut Transform, With<Eye>>,
 ) {
     // A long frame (window drag, a chunk-mesh hitch) must not turn into a teleport
     // through the floor.
@@ -572,7 +585,7 @@ fn pick_item(intent: &Intent, belt: &mut Belt, held: &mut Held) {
 
 /// Puts the camera in the player's head. The one place it is moved, so a driver's view and
 /// a walker's are the same view of the same eye — a car needs no camera of its own.
-fn aim_camera(p: &Player, camera: &mut Query<&mut Transform, With<Camera3d>>) {
+fn aim_camera(p: &Player, camera: &mut Query<&mut Transform, With<Eye>>) {
     if let Ok(mut t) = camera.single_mut() {
         t.translation = p.eye();
         t.rotation = Quat::from_euler(EulerRot::YXZ, p.yaw, p.pitch, 0.0);
@@ -992,7 +1005,7 @@ fn aim_zoom(
     held: Res<Held>,
     inventories: Res<Inventories>,
     session: NonSend<Session>,
-    mut camera: Query<&mut Projection, With<Camera3d>>,
+    mut camera: Query<&mut Projection, With<Eye>>,
 ) {
     let zoom = if intent.use_item {
         inventories.of(session.me()).using(held.0).zoom
@@ -1061,16 +1074,9 @@ fn wear_the_belt(
 /// back on when it folds away. Switched rather than despawned — the belt is a fixed set of
 /// geometry that lives as long as the world does, and rebuilding it on every visit to the
 /// forge would be a rig that pops back into existence a frame late.
-fn shut_the_belt_camera(mut cameras: Query<&mut Camera, With<belt::Rig>>) {
-    for mut camera in &mut cameras {
-        camera.is_active = false;
-    }
-}
-
-fn open_the_belt_camera(mut cameras: Query<&mut Camera, With<belt::Rig>>) {
-    for mut camera in &mut cameras {
-        camera.is_active = true;
-    }
+fn shut_the_belt(mut belt: ResMut<Belt>, cameras: Query<&mut Camera, With<belt::Rig>>) {
+    belt::show(cameras, false);
+    belt::forget_the_half_press(&mut belt);
 }
 
 /// Puts the rig's craft requests through the same door the hotbar's used: the host pays
@@ -1100,11 +1106,13 @@ fn undress_the_forge(
     mut commands: Commands,
     rig: Query<Entity, With<forge::Rig>>,
     belt_cameras: Query<&mut Camera, With<belt::Rig>>,
+    mut belt: ResMut<Belt>,
     mut hud: Query<&mut Visibility, With<hud::HudRoot>>,
     mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
     forge::leave(commands.reborrow(), rig);
-    open_the_belt_camera(belt_cameras);
+    belt::show(belt_cameras, true);
+    belt::forget_the_half_press(&mut belt);
     hud::show(&mut hud, true);
     grab_mouse(&mut cursor, true);
 }

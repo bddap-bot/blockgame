@@ -457,6 +457,28 @@ pub fn eye(belt: Res<Belt>, mut eye: Query<&mut Transform, With<Eye>>) {
         .rotation;
 }
 
+/// Draws the belt, or stops. Switched rather than despawned — it is a fixed set of geometry
+/// that lives as long as the world does, and rebuilding it on every visit to the recipe rig
+/// would be a rig that pops back into existence a frame late.
+pub fn show(mut cameras: Query<&mut Camera, With<Rig>>, drawn: bool) {
+    for mut camera in &mut cameras {
+        if camera.is_active != drawn {
+            camera.is_active = drawn;
+        }
+    }
+}
+
+/// Drops a half-spelled code at the door of a room.
+///
+/// A code is two presses and both of them belong to the surface that was on screen when
+/// they were made. Carrying half of one through a door means the first press *inside* the
+/// new room finishes something nobody aimed at — arm a cluster in the world, press craft,
+/// and the rig re-centres on whatever that stale first press plus your next one happens to
+/// spell.
+pub fn forget_the_half_press(belt: &mut Belt) {
+    belt.armed = None;
+}
+
 /// Hands both rigs the pile they draw. One [`Stock`] between them, because "what I have"
 /// is one fact and two copies of it would eventually be two answers.
 pub fn wear_the_stock(mine: &Inventory, stock: &mut Stock) {

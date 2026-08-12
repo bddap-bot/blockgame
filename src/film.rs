@@ -145,7 +145,7 @@ pub fn run(out: PathBuf, frames: u32) -> anyhow::Result<()> {
             last: frames,
         })
         .add_systems(Startup, (scenery, rig::setup, belt::enter).chain())
-        .add_systems(OnEnter(Stage::Forge), (forge::enter, shut_the_belt_camera))
+        .add_systems(OnEnter(Stage::Forge), (forge::enter, shut_the_belt))
         .add_systems(OnExit(Stage::Forge), fold_the_forge_away)
         // One chain, so the order is the order it is written in. The script's thumb is
         // outside both rooms and runs in either — a `press` that only ran in the room it
@@ -320,22 +320,22 @@ fn press(
     }
 }
 
-/// One room at a time, exactly as the game does it.
-fn shut_the_belt_camera(mut cameras: Query<&mut Camera, With<belt::Rig>>) {
-    for mut camera in &mut cameras {
-        camera.is_active = false;
-    }
+/// One room at a time, and a half-spelled code dropped at the door — exactly as the game
+/// does both.
+fn shut_the_belt(mut belt: ResMut<Belt>, cameras: Query<&mut Camera, With<belt::Rig>>) {
+    belt::show(cameras, false);
+    belt::forget_the_half_press(&mut belt);
 }
 
 fn fold_the_forge_away(
     mut commands: Commands,
     rig: Query<Entity, With<forge::Rig>>,
-    mut cameras: Query<&mut Camera, With<belt::Rig>>,
+    mut belt: ResMut<Belt>,
+    cameras: Query<&mut Camera, With<belt::Rig>>,
 ) {
     forge::leave(commands.reborrow(), rig);
-    for mut camera in &mut cameras {
-        camera.is_active = true;
-    }
+    belt::show(cameras, true);
+    belt::forget_the_half_press(&mut belt);
 }
 
 /// The film stands in for the host: a request it can afford is paid on the spot.
