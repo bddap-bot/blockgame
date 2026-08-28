@@ -336,9 +336,8 @@ fn hush(mut pad: ResMut<Pad>) {
     pad.sounded.clear();
 }
 
-/// The film stands in for the host: a request it can afford is paid on the spot.
 fn pay_for_it(mut requests: ResMut<forge::CraftRequests>, mut pocket: ResMut<Pocket>) {
-    for item in requests.0.drain(..).collect::<Vec<_>>() {
+    for item in std::mem::take(&mut requests.0) {
         pocket.0.craft(item);
     }
 }

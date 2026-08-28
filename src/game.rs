@@ -1047,15 +1047,13 @@ fn hide_the_words(mut hud: Query<&mut Visibility, With<hud::HudRoot>>) {
     hud::show(&mut hud, false);
 }
 
-/// Puts the rig's craft requests through the game's one crafting door: the host pays
-/// them, a peer asks the host to.
 fn submit_forge_crafts(
     role: Res<NetRole>,
     session: NonSend<Session>,
     mut requests: ResMut<forge::CraftRequests>,
     mut inventories: ResMut<Inventories>,
 ) {
-    for item in requests.0.drain(..).collect::<Vec<_>>() {
+    for item in std::mem::take(&mut requests.0) {
         match role.0 {
             Role::Host => submit_craft(&session, &mut inventories, session.me(), item),
             Role::Peer { .. } => session.send(Target::All, Msg::Craft { item }),
