@@ -45,8 +45,3 @@ Anything that moves is reviewed by watching it, not by describing it. `blockgame
 craft-film` writes one PNG a frame while driving the rig with the same input struct the
 pad fills, through the same systems the game runs — assemble those into a GIF and that is
 the review artifact. A mock-up shows what somebody hoped the code does.
-
-## Comments
-
-Standing directive: endeavor to remove code comments — removing comments is good in
-itself. The rare survivor states a why the code cannot show, never what the code does.
