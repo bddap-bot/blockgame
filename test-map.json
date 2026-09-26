@@ -1,10 +1,10 @@
 {
-  "about": "Touched-path → test-suite map (bothouse#236), read by `botq test-map`. Every landed change must show the commands its touched paths map to, green. First matching rule wins: specific rules above broad ones. `tests: []` means CONSCIOUSLY untested and must carry its why. An unmapped path fails the resolver loud. Commands run from the repo root; lint completeness with `botq test-map --check`.",
+  "about": "Touched-path → test-suite map (bothouse#236), read by `botq test-map`. Every landed change must show the commands its touched paths map to, green. First matching rule wins: specific rules above broad ones. `tests: []` means CONSCIOUSLY untested and must carry its why. An unmapped path fails the resolver loud. Commands run from the repo root.",
   "rules": [
     {
-      "paths": ["**/*.md", "**/.gitignore", "LICENSE", "design/**", "docs/**", "test-map.json"],
+      "paths": ["**/*.md", "**/.gitignore", "LICENSE", "design/**", "docs/**"],
       "tests": [],
-      "why": "prose, the licence, the kids' requirement drawings, the screenshot, and this manifest itself — no code to exercise"
+      "why": "prose, the licence, the kids' requirement drawings and the screenshot — no code to exercise"
     },
     {
       "paths": ["shell.nix", ".github/workflows/**"],
