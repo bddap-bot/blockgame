@@ -3,6 +3,8 @@
 The README is the game. This file is only what a change has to obey that the README has no
 reason to say.
 
+Edit by subtraction: resolve a problem by deleting code; a tactical patch over a symptom is not accepted. One implementation per thing, never two alive.
+
 ## Nobody has to read anything
 
 **In-game text is never load-bearing, and there should be as little of it as the design
