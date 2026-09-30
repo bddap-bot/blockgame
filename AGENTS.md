@@ -1,27 +1,19 @@
 # Working on blockgame
 
-The README is the game. This file is only what a change has to obey that the README has no
-reason to say.
-
 Edit by subtraction: resolve a problem by deleting code; a tactical patch over a symptom is not accepted. One implementation per thing, never two alive.
 
-## Nobody has to read anything
+Delete code comments; keep only a why the code cannot show.
 
-**In-game text is never load-bearing, and there should be as little of it as the design
-allows.** Everything the game asks of a player has to be sayable in shape, colour, motion
-and position: the player this is built for cannot read a word, and a surface that needs a
-sentence to be understood is a bug in that surface, not a missing sentence. The crafting
-rig is the standing example — a whole recipe graph with nothing written on it, where
-"eight nails, you have three" is five dark beads.
+## Communicate without reading
 
-The words that remain are a convenience for the people who can read them and never the
-only copy of anything. So when a line has to change, ask first whether it can go: the fix
-for a hint that has become a lie is usually less text, not better text.
+Express everything a player needs through shape, color, motion and position. Text
+is optional convenience, never the sole cue. For example, eight required nails
+with three available can be five dark beads. When a hint becomes wrong, first ask
+whether it can be removed.
 
-## Build and check
+## Checks
 
-`shell.nix` pins all of it — toolchain, bevy's linux inputs, and an X server for a box
-with no display.
+Use [shell.nix](shell.nix):
 
 ```sh
 nix-shell --run 'cargo fmt --check'
@@ -29,25 +21,24 @@ nix-shell --run 'cargo clippy --all-targets -- --deny warnings'
 nix-shell --run 'cargo test -- --test-threads=2'
 ```
 
-Green on all three before anything is pushed. CI runs exactly those, and `main` is what
-the handhelds pull on launch, so a red `main` is a broken game in somebody's hands.
+CI runs these checks; keep all three green before pushing code. Handhelds pull
+`main` on launch.
 
-## One seam for content
+## Content and motion
 
-Content is added in `src/registry.rs` — two tables, and a new block or craftable is a row
-in them, read by the pad, the rig and the wire alike. A holdable item also takes its slot
-in `src/code.rs`'s ROSETTE and its picture in `src/glyph.rs`; both are exhaustively
-checked, so leaving one out fails the build rather than hiding the item. Anything past
-those three files edited to make content appear has missed the seam. (README, "Adding
-things".)
+Follow [README.md](README.md#adding-things) for adding content. Keep additions in
+`src/registry.rs`, with holdable slots in `src/code.rs` and pictures in
+`src/glyph.rs`; exhaustive checks catch missing slots and glyphs. Changes elsewhere
+to make content appear should prompt a design check.
 
-## Show it running
-
-Anything that moves is reviewed by watching it, not by describing it. `blockgame
-craft-film` writes one PNG a frame while driving the rig with the same input struct the
-pad fills, through the same systems the game runs — assemble those into a GIF and that is
-the review artifact. A mock-up shows what somebody hoped the code does.
+Review movement from the running game: `blockgame craft-film` drives the real rig
+systems and writes PNG frames. Assemble those into a GIF; a mock-up does not
+verify behavior.
 
 ## Boundaries
 
-This blockgame repository names only its own components. Name another project only as a declared, versioned dependency, never through its internals. Give a needed shared service a neutral name owned by this project. Do not import the environment of machines running agents: hostnames, addresses, paths outside the repository, service or queue names, credentials, camera frames, or renders of private places. No person's name, schedule or presence enters the repository. Before landing, grep the diff for other projects' names and host details. Remove host details and undeclared project references; dependency declarations expose only the dependency's name and version.
+Keep this project independent. Reference other projects only as declared, versioned
+dependencies, exposing names and versions rather than internals. Give shared services
+neutral project-owned names. Exclude deployment-specific paths, addresses, service
+or queue names, credentials, camera frames and private renders. Before landing,
+inspect the diff for undeclared project references and deployment details.
