@@ -17,5 +17,12 @@ jobs:
       # needed even for `cargo clippy`, since winit's deps probe them from build scripts.
       - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- --deny warnings
-      - run: cargo test -- --test-threads=2
+      - run: cargo clippy --locked --all-targets -- --deny warnings
+      - run: cargo test --locked -- --test-threads=2
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@cargo-audit
+      - run: cargo audit
