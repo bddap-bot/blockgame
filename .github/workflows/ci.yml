@@ -9,16 +9,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      - uses: cachix/install-nix-action@v31
       - uses: Swatinem/rust-cache@v2
-      # bevy's linux build links audio, input, and both display stacks — the headers are
-      # needed even for `cargo clippy`, since winit's deps probe them from build scripts.
-      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
-      - run: cargo fmt --check
-      - run: cargo clippy --locked --all-targets -- --deny warnings
-      - run: cargo test --locked -- --test-threads=2
+      - run: nix-shell --run 'cargo fmt --check'
+      - run: nix-shell --run 'cargo clippy --locked --all-targets -- --deny warnings'
+      - run: nix-shell --run 'cargo test --locked -- --test-threads=2'
 
   audit:
     runs-on: ubuntu-latest
