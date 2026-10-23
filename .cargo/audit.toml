@@ -1,0 +1,6 @@
+[advisories]
+# ruzstd decompression bomb: every bevy_image release through 0.20 requires ruzstd ^0.8, so
+# no fixed version fits, and bevy's `3d` feature forces `zstd_rust` on. Unreachable here:
+# the game loads no asset files and receives none over the wire, so the only zstd input
+# is the tonemapping LUTs compiled into bevy itself. Drop this once bevy_image takes 0.9.
+ignore = ["RUSTSEC-2026-0344"]
